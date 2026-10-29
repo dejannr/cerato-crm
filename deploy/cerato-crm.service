@@ -1,0 +1,21 @@
+[Unit]
+Description=Cerato CRM API
+After=network.target postgresql.service
+Requires=postgresql.service
+
+[Service]
+Type=simple
+User=cerato-crm
+Group=cerato-crm
+WorkingDirectory=/opt/cerato-crm/app
+EnvironmentFile=/etc/cerato-crm.env
+ExecStart=/opt/cerato-crm/venv/bin/uvicorn backend.main:app --host 127.0.0.1 --port 8010
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target
