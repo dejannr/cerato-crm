@@ -3,6 +3,9 @@ import hashlib
 import hmac
 import secrets
 import time
+import threading
+from concurrent.futures import ThreadPoolExecutor
+from backend.generator import generate
 from collections import defaultdict, deque
 import imaplib
 import os
@@ -333,6 +336,69 @@ def revise_simulation(id: int, data: SimulationRevision):
         if not obj or obj.status != 'simulated': raise HTTPException(404, 'Simulation not found')
         obj.body = data.body
         return serialize(obj)
+
+# Jobs deliberately stay in memory: a service restart interrupts them instead of resending.
+JOBS = {}
+JOB_LOCK = threading.Lock()
+JOB_POOL = ThreadPoolExecutor(max_workers=1)
+class GenerateInput(BaseModel):
+    sender: str
+
+def run_generation(id: int, sender: str, lead_snapshot: dict, template: dict):
+    try:
+        result = generate(lead_snapshot, template, sender)
+        sources = result.get('sources', [])
+        if not isinstance(sources, list): raise ValueError('Invalid research sources')
+        urls = [u.strip() for u in sources if isinstance(u, str) and re.match(r'^https?://[^\s]+$', u.strip())]
+        research = str(result.get('research', '')).strip()[:12000]
+        if not research or not urls: raise ValueError('No sourced research returned')
+        # Research is retained even when the agent could not verify a recipient.
+        with Session.begin() as db:
+            obj = db.scalar(select(Lead).where(Lead.id == id).with_for_update())
+            if not obj or obj.status != 'new' or db.scalar(select(Message.id).where(Message.lead_id == id).limit(1)):
+                raise ValueError('Lead changed while research was running; no draft was created')
+            obj.research = research
+            obj.research_sources = '\n'.join(urls[:20])
+            if result.get('ready') is not True:
+                outcome = {'state':'needs_review', 'message':str(result.get('reason') or 'Recipient or research could not be verified')[:1000]}
+            else:
+                recipient = str(result.get('recipient','')).strip()
+                available = [str(x).strip().lower() for x in (obj.person_email, obj.company_email) if x]
+                if not valid_address(recipient) or recipient.lower() not in available or db.get(Suppression, recipient.lower()):
+                    raise ValueError('The verified recipient does not match an eligible spreadsheet address')
+                first = str(result.get('first_name','')).strip()
+                sentence = str(result.get('personalized_sentence','')).strip()
+                subject = (template['subject'] or str(result.get('subject',''))).strip()
+                if not first or not sentence or not subject or '\n' in subject or len(subject)>250: raise ValueError('The generated message is incomplete')
+                replacements={'{{first_name}}':first, '{{personalized_sentence}}':sentence, '{{company_name}}':obj.company}
+                body=template['body']
+                for key,value in replacements.items(): body=body.replace(key,value); subject=subject.replace(key,value)
+                if re.search(r'{{\s*[^{}]+\s*}}',body+subject): raise ValueError('The template contains unresolved placeholders')
+                message=Message(lead_id=id,direction='outbound',status='draft',sender=sender,recipient=recipient,subject=subject,body=body)
+                db.add(message); db.flush(); obj.status='review'
+                outcome = {'state':'completed','message':'Draft created. Open the conversation to review it.'}
+        with JOB_LOCK: JOBS[id] = outcome
+    except Exception as exc:
+        with JOB_LOCK: JOBS[id] = {'state':'failed', 'message':str(exc)[:500]}
+
+@app.post('/api/leads/{id}/generate')
+def generate_lead(id: int, data: GenerateInput):
+    template_id(data.sender)
+    with JOB_LOCK:
+        if any(x.get('state') == 'running' for x in JOBS.values()): raise HTTPException(409,'Another research job is running; try again when it finishes')
+        with Session() as db:
+            obj=get_lead(db,id)
+            if obj.status != 'new' or db.scalar(select(Message.id).where(Message.lead_id==id).limit(1)): raise HTTPException(409,'Only uncontacted new leads can be researched')
+            snapshot={k:getattr(obj,k) for k in ('id','company','city','category','website','linkedin','contact_name','person_email','company_email')}
+        template=get_template(data.sender)
+        JOBS[id]={'state':'running','message':'Researching this lead and preparing a draft…'}
+        JOB_POOL.submit(run_generation,id,data.sender,snapshot,template)
+    return JOBS[id]
+
+@app.get('/api/leads/{id}/generation')
+def generation_status(id: int):
+    with Session() as db: get_lead(db,id)
+    with JOB_LOCK: return JOBS.get(id, {'state':'idle','message':''})
 
 @app.post('/api/suppressions')
 def suppress(data:SuppressInput):

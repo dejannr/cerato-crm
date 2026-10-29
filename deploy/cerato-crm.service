@@ -16,6 +16,9 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
+Environment=HOME=/opt/cerato-crm
+Environment=CODEX_HOME=/opt/cerato-crm/.codex
+ReadWritePaths=/opt/cerato-crm/.codex
 
 [Install]
 WantedBy=multi-user.target
