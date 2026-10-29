@@ -25,7 +25,7 @@ from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from openpyxl import load_workbook
 from pydantic import BaseModel
-from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text, create_engine, func, or_, select
+from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text, create_engine, delete, func, or_, select
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, sessionmaker
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -408,6 +408,29 @@ def run_generation(id: int, sender: str, lead_snapshot: dict, template: dict):
         with JOB_LOCK: JOBS[id] = outcome
     except Exception as exc:
         with JOB_LOCK: JOBS[id] = {'state':'failed', 'message':str(exc)[:500]}
+
+class ResetActivityInput(BaseModel):
+    confirmation: str
+
+@app.post('/api/reset-simulated-activity')
+def reset_simulated_activity(data: ResetActivityInput):
+    if data.confirmation != 'RESET SIMULATED ACTIVITY': raise HTTPException(400, 'Confirmation text does not match')
+    with JOB_LOCK:
+        if any(job.get('state') == 'running' for job in JOBS.values()): raise HTTPException(409, 'Wait for the current research job to finish')
+        with Session.begin() as db:
+            leads = db.scalars(select(Lead).with_for_update()).all()
+            protected = set(db.scalars(select(Message.lead_id).where(or_(Message.direction != 'outbound', Message.status.not_in(['draft', 'simulated'])))).all())
+            result = db.execute(delete(Message).where(Message.direction == 'outbound', Message.status.in_(['draft', 'simulated'])))
+            reset_count = 0
+            for lead in leads:
+                if lead.id in protected or lead.status in ('do_not_contact', 'sent', 'replied'): continue
+                lead.status = 'new'
+                lead.research = None
+                lead.research_sources = None
+                lead.notes = None
+                reset_count += 1
+        JOBS.clear()
+    return {'leads_reset':reset_count,'messages_removed':result.rowcount,'protected_leads':len(protected)}
 
 @app.post('/api/leads/{id}/generate')
 def generate_lead(id: int, data: GenerateInput):
