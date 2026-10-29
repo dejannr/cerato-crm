@@ -53,7 +53,7 @@ Real sending is currently disabled in the API. Codex can research leads and crea
 
 ## Sender profiles
 
-Choose Stefan or Andrija when opening the app; use **Switch** in the header to change profiles. The selection lasts for the browser tab's session. Each sender has a separately editable template. Andrija's initial template uses his name without assuming his job title; edit his signature as needed. A lead's owner is the sender of its first outbound draft or message, visible in the lead list and detail view. Deleting an only draft releases the assignment. Existing simulated messages keep their recorded sender. Browser profile selection is not authentication and is not visible to Codex; specify the sender when requesting drafts. The internal API and mailbox settings use `adrija` for Andrija.
+Choose Stefan or Andrija when opening the app; use **Switch** in the header to change profiles. The selection lasts for the browser tab's session. Each sender has a separately editable template. Each sender can edit their name and title in their template; defaults are Stefan / CTO and Andrija / CBO. The {{sender_name}} and {{sender_role}} placeholders fill those values in new messages. A lead's owner is the sender of its first outbound draft or message, visible in the lead list and detail view. Deleting an only draft releases the assignment. Existing simulated messages keep their recorded sender. Browser profile selection is not authentication and is not visible to Codex; specify the sender when requesting drafts. The internal API and mailbox settings use `adrija` for Andrija.
 
 ## Production
 
@@ -64,3 +64,5 @@ To publish a later committed version, push it to GitHub and run `./deploy/update
 ## Codex lead research
 
 Select a new lead and click **Create with Codex**. GPT-6.1 Terra researches public sources and, when it finds a relevant, sourced company fact, creates a draft with the selected sender's template. It uses the contact name and email already on the lead without checking their identity. If company research is insufficient, it asks for review. No email is sent. Only one research job runs at a time; a server restart interrupts it. Jobs use the Codex CLI signed in on the machine running the backend, with live search enabled and command tools disabled. Local jobs use your local Codex login; the droplet has a separate device-authorized login. Agent research may be wrong, so review the message and sources. CLI equivalents: `python3 tools/outreach.py generate LEAD_ID --sender stefan` and `python3 tools/outreach.py generation LEAD_ID`. The CLI requires a local, unauthenticated development API; production access uses the authenticated interface.
+
+The interface checks for lead and conversation updates every five seconds while the page is visible. Unsaved draft and research edits are preserved during background refresh. Local and production databases remain separate.
