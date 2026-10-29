@@ -352,7 +352,7 @@ def run_generation(id: int, sender: str, lead_snapshot: dict, template: dict):
         urls = [u.strip() for u in sources if isinstance(u, str) and re.match(r'^https?://[^\s]+$', u.strip())]
         research = str(result.get('research', '')).strip()[:12000]
         if not research or not urls: raise ValueError('No sourced research returned')
-        # Research is retained even when the agent could not verify a recipient.
+        # Retain research when the company does not provide enough information for personalization.
         with Session.begin() as db:
             obj = db.scalar(select(Lead).where(Lead.id == id).with_for_update())
             if not obj or obj.status != 'new' or db.scalar(select(Message.id).where(Message.lead_id == id).limit(1)):
@@ -360,12 +360,11 @@ def run_generation(id: int, sender: str, lead_snapshot: dict, template: dict):
             obj.research = research
             obj.research_sources = '\n'.join(urls[:20])
             if result.get('ready') is not True:
-                outcome = {'state':'needs_review', 'message':str(result.get('reason') or 'Recipient or research could not be verified')[:1000]}
+                outcome = {'state':'needs_review', 'message':str(result.get('reason') or 'Insufficient company research for personalization')[:1000]}
             else:
-                recipient = str(result.get('recipient','')).strip()
-                available = [str(x).strip().lower() for x in (obj.person_email, obj.company_email) if x]
-                if not valid_address(recipient) or recipient.lower() not in available or db.get(Suppression, recipient.lower()):
-                    raise ValueError('The verified recipient does not match an eligible spreadsheet address')
+                recipient = next((str(x).strip() for x in (obj.person_email, obj.company_email) if x and valid_address(str(x).strip())), None)
+                if not recipient: raise ValueError('This lead needs a single valid email address to create a draft')
+                if db.get(Suppression, recipient.lower()): raise ValueError('This recipient is marked do not contact')
                 first = str(result.get('first_name','')).strip()
                 sentence = str(result.get('personalized_sentence','')).strip()
                 subject = (template['subject'] or str(result.get('subject',''))).strip()
