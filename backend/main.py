@@ -4,8 +4,10 @@ import hmac
 import secrets
 import time
 import threading
+import uuid
 from concurrent.futures import ThreadPoolExecutor
 from backend.generator import generate
+from backend import mailbox as mail_client
 from collections import defaultdict, deque
 import imaplib
 import os
@@ -15,10 +17,11 @@ import ssl
 from datetime import datetime, timezone
 from email.header import decode_header, make_header
 from email.message import EmailMessage
-from email.utils import getaddresses, make_msgid, parsedate_to_datetime
+from email.utils import formatdate, getaddresses, make_msgid, parsedate_to_datetime
 from pathlib import Path
 from urllib.parse import urlparse
 
+from cryptography.fernet import Fernet, InvalidToken
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.responses import JSONResponse
@@ -60,6 +63,24 @@ class Message(Base):
     error: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
     sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+class MailboxCredential(Base):
+    __tablename__ = 'mailbox_credentials'
+    sender: Mapped[str] = mapped_column(String, primary_key=True)
+    address: Mapped[str] = mapped_column(String)
+    encrypted_password: Mapped[str] = mapped_column(Text)
+
+class MailSubmission(Base):
+    __tablename__ = 'mail_submissions'
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    sender: Mapped[str] = mapped_column(String)
+    recipient: Mapped[str] = mapped_column(String)
+    subject: Mapped[str] = mapped_column(String)
+    body: Mapped[str] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(String)
+    message_id: Mapped[str] = mapped_column(String, unique=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    error: Mapped[str | None] = mapped_column(Text)
+
 class Suppression(Base):
     __tablename__ = 'suppressions'
     email: Mapped[str] = mapped_column(String, primary_key=True)
@@ -166,9 +187,18 @@ def logout(response: Response):
 def serialize(obj):
     return {c.name: getattr(obj, c.name) for c in obj.__table__.columns}
 def mailbox(key):
-    if key not in ('stefan', 'adrija'): raise HTTPException(400, 'Choose Stefan or Adrija')
-    address, password = os.getenv(key.upper()+'_EMAIL','').strip(), os.getenv(key.upper()+'_PASSWORD','')
-    if not address or not password: raise HTTPException(400, f'{key.title()} mailbox is not configured in .env')
+    if key not in ('stefan', 'adrija'): raise HTTPException(400, 'Choose Stefan or Andrija')
+    default = 'stefan@ceratosystems.com' if key == 'stefan' else 'andrija@ceratosystems.com'
+    with Session() as db:
+        saved = db.get(MailboxCredential, key)
+        if saved:
+            try:
+                key_value = os.getenv('MAILBOX_ENCRYPTION_KEY','').encode()
+                return saved.address, Fernet(key_value).decrypt(saved.encrypted_password.encode()).decode()
+            except (ValueError, InvalidToken): raise HTTPException(503, 'Mailbox encryption key is missing or invalid.')
+    address = os.getenv(key.upper()+'_EMAIL','').strip() or default
+    password = os.getenv(key.upper()+'_PASSWORD','')
+    if not password: raise HTTPException(400, f'{key.title()} mailbox is not connected.')
     return address, password
 def valid_address(value): return bool(re.fullmatch(r'[^\s@,;]+@[^\s@,;]+\.[^\s@,;]+', value or ''))
 def get_lead(db, id):
@@ -254,7 +284,14 @@ def update_template(data: TemplateInput, sender: str = 'stefan'):
 @app.get('/api/health')
 def health(): return {'ok': True}
 @app.get('/api/settings')
-def settings(): return {'mailboxes': [{'id': x, 'email': os.getenv(x.upper()+'_EMAIL',''), 'configured': bool(os.getenv(x.upper()+'_EMAIL') and os.getenv(x.upper()+'_PASSWORD'))} for x in ('stefan','adrija')]}
+def settings():
+    with Session() as db:
+        result=[]
+        for sender in ('stefan','adrija'):
+            saved=db.get(MailboxCredential,sender)
+            default='stefan@ceratosystems.com' if sender=='stefan' else 'andrija@ceratosystems.com'
+            result.append({'id':sender,'email':saved.address if saved else (os.getenv(sender.upper()+'_EMAIL','').strip() or default),'configured':bool(saved or os.getenv(sender.upper()+'_PASSWORD'))})
+        return {'mailboxes':result,'mail_setup_available':bool(os.getenv('MAILBOX_ENCRYPTION_KEY'))}
 @app.post('/api/import')
 def import_leads():
     path = ROOT / 'road_groupage_companies.xlsx'
@@ -468,6 +505,96 @@ def plain_body(msg):
             payload=part.get_payload(decode=True)
             if payload: return payload.decode(part.get_content_charset() or 'utf-8',errors='replace')[:50000]
     return ''
+class ComposeMailInput(BaseModel):
+    request_id: uuid.UUID
+    recipient: str
+    subject: str
+    body: str
+    in_reply_to: str = ''
+    references: str = ''
+
+
+def mail_connection(sender):
+    address,password = mailbox(sender)
+    return mail_client.connect(address,password,os.getenv('IMAP_HOST','imap.purelymail.com'),int(os.getenv('IMAP_PORT','993')))
+
+class MailboxSetupInput(BaseModel):
+    address: str
+    password: str
+
+@app.put('/api/mail/{sender}/connection')
+def connect_mailbox(sender: str, data: MailboxSetupInput):
+    template_id(sender)
+    address=data.address.strip()
+    if not valid_address(address) or not data.password or len(data.password)>1024: raise HTTPException(400,'Enter a valid email address and mailbox password.')
+    try: cipher=Fernet(os.getenv('MAILBOX_ENCRYPTION_KEY','').encode())
+    except ValueError: raise HTTPException(503,'Mailbox encryption is not configured on the server.')
+    try:
+        with mail_client.connect(address,data.password,os.getenv('IMAP_HOST','imap.purelymail.com'),int(os.getenv('IMAP_PORT','993'))) as client:
+            mail_client.select_folder(client,'inbox')
+    except Exception: raise HTTPException(400,'Could not connect to Purelymail. Check the email and password.')
+    encrypted=cipher.encrypt(data.password.encode()).decode()
+    with Session.begin() as db:
+        saved=db.get(MailboxCredential,sender)
+        if not saved: db.add(MailboxCredential(sender=sender,address=address,encrypted_password=encrypted))
+        else: saved.address=address; saved.encrypted_password=encrypted
+    return {'ok':True,'address':address}
+
+@app.get('/api/mail/{sender}/messages')
+def mailbox_messages(sender: str, folder: str = 'inbox'):
+    try:
+        with mail_connection(sender) as client: return mail_client.list_messages(client,folder)
+    except HTTPException: raise
+    except mail_client.MailboxError as exc: raise HTTPException(400,str(exc))
+    except Exception: raise HTTPException(502,'Could not connect to the mailbox. Check the Purelymail settings and credentials.')
+
+@app.get('/api/mail/{sender}/messages/{uid}')
+def mailbox_message(sender: str, uid: str, folder: str = 'inbox', uidvalidity: str = ''):
+    try:
+        with mail_connection(sender) as client: return mail_client.read_message(client,folder,uid,uidvalidity)
+    except HTTPException: raise
+    except mail_client.MailboxError as exc: raise HTTPException(400,str(exc))
+    except Exception: raise HTTPException(502,'Could not read this message from the mailbox.')
+
+@app.post('/api/mail/{sender}/send')
+def send_manual_mail(sender: str, data: ComposeMailInput):
+    address,password = mailbox(sender)
+    recipient = data.recipient.strip()
+    if not valid_address(recipient) or not data.subject.strip() or not data.body.strip() or len(data.subject)>300 or len(data.body)>100000:
+        raise HTTPException(400,'Provide one valid recipient, a subject and a message.')
+    if any('\n' in value or '\r' in value for value in (data.subject,data.in_reply_to,data.references)):
+        raise HTTPException(400,'Invalid message header.')
+    with Session.begin() as db:
+        existing=db.get(MailSubmission,str(data.request_id))
+        if existing:
+            if existing.sender!=sender or existing.recipient!=recipient or existing.subject!=data.subject or existing.body!=data.body: raise HTTPException(409,'This request ID was already used for a different message.')
+            return {'status':existing.status,'message_id':existing.message_id,'warning':existing.error}
+        if db.get(Suppression,recipient.lower()): raise HTTPException(409,'This address is marked do not contact.')
+        item=MailSubmission(id=str(data.request_id),sender=sender,recipient=recipient,subject=data.subject,body=data.body,status='sending',message_id=make_msgid())
+        db.add(item); db.flush(); message_id=item.message_id
+    msg=EmailMessage(); msg['From']=address; msg['To']=recipient; msg['Subject']=data.subject; msg['Message-ID']=message_id; msg['Date']=formatdate(localtime=False)
+    if data.in_reply_to:
+        msg['In-Reply-To']=data.in_reply_to
+        msg['References']=(data.references+' '+data.in_reply_to).strip()
+    msg.set_content(data.body)
+    try:
+        with smtplib.SMTP_SSL(os.getenv('SMTP_HOST','smtp.purelymail.com'),int(os.getenv('SMTP_PORT','465')),context=ssl.create_default_context(),timeout=30) as smtp:
+            smtp.login(address,password); smtp.send_message(msg)
+    except Exception:
+        with Session.begin() as db:
+            item=db.get(MailSubmission,str(data.request_id)); item.status='uncertain'; item.error='Check your mailbox before trying again.'
+        return {'status':'uncertain','message_id':message_id,'warning':'The sending outcome is uncertain. Check your mailbox before trying again.'}
+    warning=None
+    try:
+        with mail_connection(sender) as client:
+            sent=mail_client.folder_name(client,'sent')
+            status,_=client.append('\"'+sent.replace('\\','\\\\').replace('\"','\\\"')+'\"','(\\Seen)',imaplib.Time2Internaldate(time.time()),msg.as_bytes())
+            if status!='OK': raise RuntimeError('Sent folder append failed')
+    except Exception: warning='The server accepted the email, but the copy could not be saved to Sent.'
+    with Session.begin() as db:
+        item=db.get(MailSubmission,str(data.request_id)); item.status='sent'; item.error=warning
+    return {'status':'sent','message_id':message_id,'warning':warning}
+
 @app.post('/api/sync/{sender}')
 def sync(sender:str):
     address,password=mailbox(sender); matched=0

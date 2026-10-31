@@ -1,6 +1,6 @@
 # Cerato CRM
 
-A local outreach CRM: React, FastAPI, and PostgreSQL. Sending is currently disabled for simulation. The app has no authentication and is intended to bind to localhost only.
+A local outreach CRM: React, FastAPI, and PostgreSQL. Sending is currently disabled for simulation. The local app has no authentication and must bind to localhost only; production uses a shared login.
 
 ## Setup
 
@@ -49,7 +49,7 @@ These commands require the local API to be running. The helper does not send ema
 
 ## Simulation mode
 
-Real sending is currently disabled in the API. Codex can research leads and create real drafts, and each lead’s conversation can record a simulated send without connecting a mailbox. A simulated message remains in the lead's conversation history and the lead is marked `simulated`; it is not delivered. This simulation does not generate replies or delivery events. Re-enabling real sending would require an intentional implementation change and separate testing.
+Outreach campaign sending is currently disabled in the API. The separate Inbox supports manually composing and confirming real email. Codex can research leads and create real drafts, and each lead’s conversation can record a simulated send without connecting a mailbox. A simulated message remains in the lead's conversation history and the lead is marked `simulated`; it is not delivered. This simulation does not generate replies or delivery events. Re-enabling real sending would require an intentional implementation change and separate testing.
 
 ## Sender profiles
 
@@ -66,3 +66,11 @@ To publish a later committed version, push it to GitHub and run `./deploy/update
 Select a new lead and click **Create with Codex**. GPT-6.1 Terra researches public sources and, when it finds a relevant, sourced company fact, creates a draft with the selected sender's template. It uses the contact name and email already on the lead without checking their identity. If company research is insufficient, it asks for review. No email is sent. Only one research job runs at a time; a server restart interrupts it. Jobs use the Codex CLI signed in on the machine running the backend, with live search enabled and command tools disabled. Local jobs use your local Codex login; the droplet has a separate device-authorized login. Agent research may be wrong, so review the message and sources. CLI equivalents: `python3 tools/outreach.py generate LEAD_ID --sender stefan` and `python3 tools/outreach.py generation LEAD_ID`. The CLI requires a local, unauthenticated development API; production access uses the authenticated interface.
 
 The interface checks for lead and conversation updates every five seconds while the page is visible. Unsaved draft and research edits are preserved during background refresh. Local and production databases remain separate.
+
+## Purelymail inbox
+
+Select Stefan or Andrija, open **Inbox**, then use **Connect mailbox** and enter that mailbox's Purelymail password or app password. The app tests IMAP before storing an encrypted credential; it never displays the password again. It reads the latest 50 messages directly from the provider, refreshes while the Inbox is open, and does not mark them read. HTML messages are shown as plain text. Attachment names are shown; open or download them in your regular email client.
+
+The Inbox supports manually composed real messages and replies after an explicit confirmation. Accepted messages are appended to the provider's Sent folder when possible. If the send result is uncertain, check Purelymail before trying again. Outreach lead drafts and simulations remain separate and cannot be sent through the outreach workflow. Inbox messages are not yet automatically linked to leads.
+
+Credentials are encrypted with `MAILBOX_ENCRYPTION_KEY`, a Fernet key kept outside the database in `.env` locally and `/etc/cerato-crm.env` on the droplet. Keep this key private and back it up securely: losing or changing it requires reconnecting the mailboxes. Generate a key with `.venv/bin/python -c 'from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())'`. The existing CRM login is shared; anyone with access can open either mailbox.
