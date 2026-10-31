@@ -25,6 +25,8 @@ class FakeSMTP:
     def __exit__(self,*args): return False
     def login(self,*args): pass
     def send_message(self,msg): FakeSMTP.sends+=1
+    def quit(self): pass
+    def close(self): pass
 
 class MailboxTests(unittest.TestCase):
     def test_imap_folders_headers_and_uidvalidity(self):
@@ -47,5 +49,22 @@ class MailboxTests(unittest.TestCase):
             self.assertEqual(a['status'],'sent'); self.assertEqual(b['status'],'sent'); self.assertEqual(FakeSMTP.sends,1)
             changed=data.model_copy(update={'body':'Different'})
             with self.assertRaises(app.HTTPException):app.send_manual_mail('stefan',changed)
+
+    def test_smtp_connection_failure_is_not_sent(self):
+        key=Fernet.generate_key().decode()
+        with patch.dict(app.os.environ,{'MAILBOX_ENCRYPTION_KEY':key}),patch.object(client,'connect',return_value=FakeIMAP()),patch.object(app.smtplib,'SMTP_SSL',side_effect=TimeoutError('blocked')):
+            app.connect_mailbox('stefan',app.MailboxSetupInput(address='stefan@ceratosystems.com',password='not-a-real-password'))
+            data=app.ComposeMailInput(request_id=uuid4(),recipient='test@example.com',subject='Connection test',body='Hello')
+            result=app.send_manual_mail('stefan',data)
+            self.assertEqual(result['status'],'failed'); self.assertIn('Not sent',result['warning'])
+
+    def test_submission_failure_remains_uncertain(self):
+        class InterruptedSMTP(FakeSMTP):
+            def send_message(self,msg): raise TimeoutError('connection lost during submission')
+        key=Fernet.generate_key().decode()
+        with patch.dict(app.os.environ,{'MAILBOX_ENCRYPTION_KEY':key}),patch.object(client,'connect',return_value=FakeIMAP()),patch.object(app.smtplib,'SMTP_SSL',InterruptedSMTP):
+            app.connect_mailbox('stefan',app.MailboxSetupInput(address='stefan@ceratosystems.com',password='not-a-real-password'))
+            data=app.ComposeMailInput(request_id=uuid4(),recipient='test@example.com',subject='Submission test',body='Hello')
+            self.assertEqual(app.send_manual_mail('stefan',data)['status'],'uncertain')
 
 if __name__=='__main__':unittest.main()

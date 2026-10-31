@@ -577,13 +577,35 @@ def send_manual_mail(sender: str, data: ComposeMailInput):
         msg['In-Reply-To']=data.in_reply_to
         msg['References']=(data.references+' '+data.in_reply_to).strip()
     msg.set_content(data.body)
-    try:
-        with smtplib.SMTP_SSL(os.getenv('SMTP_HOST','smtp.purelymail.com'),int(os.getenv('SMTP_PORT','465')),context=ssl.create_default_context(),timeout=30) as smtp:
-            smtp.login(address,password); smtp.send_message(msg)
-    except Exception:
+    # A failure before submission is definitely not sent. Once submission begins,
+    # network failures can be ambiguous and must never trigger an automatic retry.
+    def record_failure(status, message):
         with Session.begin() as db:
-            item=db.get(MailSubmission,str(data.request_id)); item.status='uncertain'; item.error='Check your mailbox before trying again.'
-        return {'status':'uncertain','message_id':message_id,'warning':'The sending outcome is uncertain. Check your mailbox before trying again.'}
+            item=db.get(MailSubmission,str(data.request_id)); item.status=status; item.error=message
+        return {'status':status,'message_id':message_id,'warning':message}
+    smtp = None
+    try:
+        smtp = smtplib.SMTP_SSL(os.getenv('SMTP_HOST','smtp.purelymail.com'),int(os.getenv('SMTP_PORT','465')),context=ssl.create_default_context(),timeout=15)
+        smtp.login(address,password)
+    except smtplib.SMTPAuthenticationError:
+        if smtp:
+            try: smtp.close()
+            except Exception: pass
+        return record_failure('failed','Not sent: Purelymail rejected the mailbox login. Check the account credentials.')
+    except Exception:
+        if smtp:
+            try: smtp.close()
+            except Exception: pass
+        return record_failure('failed','Not sent: the CRM could not connect to the outgoing mail server. Check the server network and SMTP settings.')
+    try:
+        smtp.send_message(msg)
+    except (smtplib.SMTPRecipientsRefused, smtplib.SMTPSenderRefused, smtplib.SMTPDataError):
+        return record_failure('failed','Not sent: the outgoing mail server rejected the message.')
+    except Exception:
+        return record_failure('uncertain','The sending outcome is uncertain. Check your mailbox before trying again.')
+    finally:
+        try: smtp.quit()
+        except Exception: smtp.close()
     warning=None
     try:
         with mail_connection(sender) as client:
