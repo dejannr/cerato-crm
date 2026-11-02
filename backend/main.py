@@ -143,11 +143,7 @@ I’m {{sender_name}} from Cerato Systems. We help logistics and transport compa
 
 I’d love to record a short video for {{company_name}} showing 3 places where that kind of manual work could be automated, using the systems you already have. It’s completely free, and yours to keep either way.
 
-Want me to record the walkthrough?
-
-Best,
-{{sender_name}}
-{{sender_role}}, Cerato Systems"""
+Want me to record the walkthrough?"""
 Base.metadata.create_all(engine)
 app = FastAPI(title='Cerato CRM')
 app.add_middleware(CORSMiddleware, allow_origins=['http://localhost:5173','http://127.0.0.1:5173'], allow_methods=['*'], allow_headers=['*'])
@@ -260,8 +256,6 @@ class SuppressInput(BaseModel):
 class TemplateInput(BaseModel):
     subject: str = ''
     body: str
-    sender_name: str | None = None
-    sender_role: str | None = None
 
 def template_id(sender: str):
     if sender not in ('stefan', 'adrija'): raise HTTPException(400, 'Choose Stefan or Andrija')
@@ -270,20 +264,17 @@ def template_id(sender: str):
 def default_template_for(sender: str):
     return DEFAULT_TEMPLATE
 
-def profile_for(db, sender):
-    profile = db.get(SenderProfile, sender)
-    if not profile:
-        profile = SenderProfile(sender=sender, name='Stefan' if sender == 'stefan' else 'Andrija', role='CTO' if sender == 'stefan' else 'CBO')
-        db.add(profile)
-        db.flush()
-    return profile
-
 def normalize_legacy_template(body, sender):
-    # Upgrade only the exact original introduction and signature, retaining custom text.
+    # Upgrade the original introduction and remove only the known original footer.
     name = 'Stefan' if sender == 'stefan' else 'Andrija'
     body = body.replace('I’m ' + name + ' from Cerato Systems.', 'I’m {{sender_name}} from Cerato Systems.')
-    body = body.replace('Best,\nStefan\nCTO, Cerato Systems', 'Best,\n{{sender_name}}\n{{sender_role}}, Cerato Systems')
-    body = body.replace('Best,\nAndrija\nCerato Systems', 'Best,\n{{sender_name}}\n{{sender_role}}, Cerato Systems')
+    stripped=body.rstrip()
+    footers=('Best,\n{{sender_name}}\n{{sender_role}}, Cerato Systems',
+             'Best,\nStefan\nCTO, Cerato Systems', 'Best,\nAndrija\nCBO, Cerato Systems',
+             'Best,\nAndrija\nCerato Systems')
+    for footer in footers:
+        if stripped.endswith(footer) and (len(stripped)==len(footer) or stripped[-len(footer)-1]=='\n'):
+            return stripped[:-len(footer)].rstrip()
     return body
 
 @app.get('/api/template')
@@ -295,29 +286,25 @@ def get_template(sender: str = 'stefan'):
             template = EmailTemplate(id=key, subject='', body=default_template_for(sender))
             db.add(template)
             db.flush()
-        profile = profile_for(db, sender)
-        return {**serialize(template), 'body':normalize_legacy_template(template.body,sender), 'sender':sender, 'sender_name':profile.name, 'sender_role':profile.role}
+        profile = signature_settings(db, sender)
+        return {**serialize(template), 'body':normalize_legacy_template(template.body,sender), 'sender':sender, 'sender_name':profile['name'], 'sender_role':profile['title']}
 
 @app.put('/api/template')
 def update_template(data: TemplateInput, sender: str = 'stefan'):
     key = template_id(sender)
     if not data.body.strip(): raise HTTPException(400, 'Template body cannot be empty')
     if '\n' in data.subject or '\r' in data.subject: raise HTTPException(400, 'Subject must be a single line')
-    for value in (data.sender_name, data.sender_role):
-        if value is not None and (not value.strip() or '\n' in value or '\r' in value or len(value)>100 or '{{' in value or '}}' in value): raise HTTPException(400, 'Name and title must be short, single-line values')
     with Session.begin() as db:
         template = db.get(EmailTemplate, key)
         if not template:
-            template = EmailTemplate(id=key, subject=data.subject, body=data.body)
+            template = EmailTemplate(id=key, subject=data.subject, body=normalize_legacy_template(data.body,sender))
             db.add(template)
         else:
             template.subject = data.subject
-            template.body = data.body
-        profile = profile_for(db, sender)
-        if data.sender_name is not None: profile.name = data.sender_name.strip()
-        if data.sender_role is not None: profile.role = data.sender_role.strip()
+            template.body = normalize_legacy_template(data.body,sender)
+        profile = signature_settings(db, sender)
         db.flush()
-        return {**serialize(template), 'sender': sender, 'sender_name':profile.name, 'sender_role':profile.role}
+        return {**serialize(template), 'sender': sender, 'sender_name':profile['name'], 'sender_role':profile['title']}
 
 @app.get('/api/health')
 def health(): return {'ok': True}
