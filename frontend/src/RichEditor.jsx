@@ -2,14 +2,42 @@ import React,{useEffect,useRef,useState} from 'react';
 import {useEditor,EditorContent} from '@tiptap/react';
 import StarterKit from '@tiptap/starter-kit';
 import Image from '@tiptap/extension-image';
+import Underline from '@tiptap/extension-underline';
+import Link from '@tiptap/extension-link';
+import TextAlign from '@tiptap/extension-text-align';
+import {TextStyle,FontSize} from '@tiptap/extension-text-style';
+import Color from '@tiptap/extension-color';
+import FontFamily from '@tiptap/extension-font-family';
+import Highlight from '@tiptap/extension-highlight';
+import {Table,TableRow,TableCell,TableHeader} from '@tiptap/extension-table';
+import stefanPhoto from './assets/stefan-signature.jpg?inline';
 
-export default function RichEditor({initialHtml,onChange,disabled=false,label='Message'}) {
+const StyledCell=TableCell.extend({
+ addAttributes(){return {...this.parent?.(),style:{default:null,parseHTML:el=>el.getAttribute('style'),renderHTML:attrs=>attrs.style?{style:attrs.style}:{}}}},
+});
+const EDITOR_EXTENSIONS=[StarterKit.configure({heading:false,codeBlock:false,link:false}),TextStyle,FontSize,Color,FontFamily,Underline,Link.configure({openOnClick:false,autolink:true,HTMLAttributes:{rel:'noopener noreferrer',target:'_blank'}}),Image.configure({inline:true,allowBase64:true}),TextAlign.configure({types:['paragraph','listItem']}),Highlight.configure({multicolor:true}),Table.configure({resizable:false}),TableRow,StyledCell,TableHeader];
+
+export default function RichEditor({initialHtml,onChange,disabled=false,label='Message',signaturePreset}) {
  const input=useRef(null),[warning,setWarning]=useState('');
- const editor=useEditor({extensions:[StarterKit.configure({heading:false,codeBlock:false,horizontalRule:false,link:{openOnClick:false}}),Image.configure({inline:true,allowBase64:true})],content:initialHtml||'<p></p>',editable:!disabled,onUpdate:({editor})=>onChange({html:editor.getHTML(),text:editor.getText({blockSeparator:'\n\n'})}),editorProps:{attributes:{'aria-label':label,'role':'textbox','aria-multiline':'true'}}});
+ const editor=useEditor({extensions:EDITOR_EXTENSIONS,content:initialHtml||'<p></p>',editable:!disabled,onUpdate:({editor})=>onChange({html:editor.getHTML(),text:editor.getText({blockSeparator:'\n\n'})}),editorProps:{attributes:{'aria-label':label,'role':'textbox','aria-multiline':'true'}}});
  useEffect(()=>{editor?.setEditable(!disabled)},[editor,disabled]);
  const button=(title,text,action,active=false)=><button type="button" title={title} aria-label={title} aria-pressed={active} className={active?'active':''} onMouseDown={e=>e.preventDefault()} onClick={action} disabled={disabled}>{text}</button>;
- function addLink(){const value=window.prompt('Enter an https:// or http:// link');if(value===null)return;if(!/^https?:\/\//i.test(value)){setWarning('Enter a link beginning with https:// or http://.');return}setWarning('');editor.chain().focus().extendMarkRange('link').setLink({href:value}).run()}
+ function addLink(){const value=window.prompt('Enter an https://, http:// or mailto: link');if(value===null)return;if(!/^(https?:\/\/|mailto:)[^\s]+$/i.test(value)){setWarning('Enter a valid https://, http:// or mailto: link.');return}setWarning('');editor.chain().focus().extendMarkRange('link').setLink({href:value}).run()}
  function imageChanged(e){const file=e.target.files?.[0];e.target.value='';if(!file)return;if(!['image/png','image/jpeg','image/gif','image/webp'].includes(file.type)){setWarning('Choose a PNG, JPEG, GIF or WebP image.');return}if(file.size>50000){setWarning('Choose an image smaller than 50 KB. All images in one email must total 60 KB or less.');return}const reader=new FileReader();reader.onload=()=>{editor.chain().focus().setImage({src:reader.result,alt:file.name}).run();setWarning('')};reader.onerror=()=>setWarning('Could not read this image.');reader.readAsDataURL(file)}
+ function insertSignature(){if(!signaturePreset)return;const safeName=signaturePreset.name;const safeRole=signaturePreset.role;const photo=signaturePreset.photo?`<td style="border-left:1px solid #d7e1da;padding:0 14px;vertical-align:middle"><img src="${stefanPhoto}" alt="${safeName}" /></td>`:'';const html=`<table><tbody><tr><td><p>Best,</p><p><strong>${safeName}</strong><br>${safeRole}, Cerato Systems</p></td>${photo}</tr></tbody></table>`;editor.commands.setContent(html);setWarning('');}
+ function colorChanged(e){const value=e.target.value;editor.chain().focus().setColor(value).run()}
+ function highlightChanged(e){const value=e.target.value;editor.chain().focus().toggleHighlight({color:value}).run()}
  if(!editor)return null;
- return <div className={'rich-editor '+(disabled?'disabled':'')}><div className="rich-toolbar" role="toolbar" aria-label={label+' formatting'}>{button('Bold',<strong>B</strong>,()=>editor.chain().focus().toggleBold().run(),editor.isActive('bold'))}{button('Italic',<em>I</em>,()=>editor.chain().focus().toggleItalic().run(),editor.isActive('italic'))}{button('Underline',<u>U</u>,()=>editor.chain().focus().toggleUnderline().run(),editor.isActive('underline'))}<span className="rich-divider"/>{button('Bulleted list','• List',()=>editor.chain().focus().toggleBulletList().run(),editor.isActive('bulletList'))}{button('Numbered list','1. List',()=>editor.chain().focus().toggleOrderedList().run(),editor.isActive('orderedList'))}{button('Insert link','Link',addLink,editor.isActive('link'))}{button('Insert image','Image',()=>input.current?.click())}<input ref={input} type="file" accept="image/png,image/jpeg,image/gif,image/webp" hidden onChange={imageChanged}/></div><EditorContent editor={editor}/>{warning&&<p className="rich-warning" role="alert">{warning}</p>}</div>
+ return <div className={'rich-editor '+(disabled?'disabled':'')}><div className="rich-toolbar" role="toolbar" aria-label={label+' formatting'}>
+  {button('Undo','↶',()=>editor.chain().focus().undo().run())}{button('Redo','↷',()=>editor.chain().focus().redo().run())}<span className="rich-divider"/>
+  <select aria-label="Font family" title="Font family" defaultValue="" disabled={disabled} onChange={e=>{if(e.target.value)editor.chain().focus().setFontFamily(e.target.value).run();e.target.value=''}}><option value="">Font</option><option value="Arial">Arial</option><option value="Georgia">Georgia</option><option value="Tahoma">Tahoma</option><option value="Verdana">Verdana</option><option value="Courier New">Courier New</option></select>
+  <select aria-label="Font size" title="Font size" defaultValue="" disabled={disabled} onChange={e=>{if(e.target.value)editor.chain().focus().setMark('textStyle',{fontSize:e.target.value}).run();e.target.value=''}}><option value="">Size</option><option value="12px">Small</option><option value="14px">Normal</option><option value="18px">Large</option><option value="24px">Huge</option></select>
+  {button('Bold',<strong>B</strong>,()=>editor.chain().focus().toggleBold().run(),editor.isActive('bold'))}{button('Italic',<em>I</em>,()=>editor.chain().focus().toggleItalic().run(),editor.isActive('italic'))}{button('Underline',<u>U</u>,()=>editor.chain().focus().toggleUnderline().run(),editor.isActive('underline'))}{button('Strikethrough','S̶',()=>editor.chain().focus().toggleStrike().run(),editor.isActive('strike'))}
+  <label className="rich-color" title="Text color">A<input aria-label="Text color" type="color" defaultValue="#26362e" disabled={disabled} onChange={colorChanged}/></label><label className="rich-color" title="Highlight color">▰<input aria-label="Highlight color" type="color" defaultValue="#fff2a8" disabled={disabled} onChange={highlightChanged}/></label><span className="rich-divider"/>
+  {button('Align left','≡',()=>editor.chain().focus().setTextAlign('left').run())}{button('Align center','☰',()=>editor.chain().focus().setTextAlign('center').run())}{button('Align right','≡',()=>editor.chain().focus().setTextAlign('right').run())}
+  {button('Bulleted list','• List',()=>editor.chain().focus().toggleBulletList().run(),editor.isActive('bulletList'))}{button('Numbered list','1. List',()=>editor.chain().focus().toggleOrderedList().run(),editor.isActive('orderedList'))}{button('Decrease indent','⇤',()=>editor.chain().focus().liftListItem('listItem').run())}{button('Increase indent','⇥',()=>editor.chain().focus().sinkListItem('listItem').run())}
+  {button('Insert link','Link',addLink,editor.isActive('link'))}{button('Insert image','Image',()=>input.current?.click())}<input ref={input} type="file" accept="image/png,image/jpeg,image/gif,image/webp" hidden onChange={imageChanged}/>
+  {button('Quote','❞',()=>editor.chain().focus().toggleBlockquote().run(),editor.isActive('blockquote'))}{button('Insert divider','—',()=>editor.chain().focus().setHorizontalRule().run())}{button('Insert table','▦',()=>editor.chain().focus().insertTable({rows:2,cols:2,withHeaderRow:false}).run())}{button('Clear formatting','Tx',()=>editor.chain().focus().clearNodes().unsetAllMarks().run())}
+  {signaturePreset&&<>{button('Insert professional signature','Signature',insertSignature)}{signaturePreset.photo&&<small className="signature-image-note">Photo included</small>}</>}
+ </div><EditorContent editor={editor}/>{warning&&<p className="rich-warning" role="alert">{warning}</p>}</div>
 }
