@@ -620,7 +620,9 @@ def send_manual_mail(sender: str, data: ComposeMailInput):
     recipient = data.recipient.strip()
     if not valid_address(recipient) or not data.subject.strip() or len(data.subject)>300 or len(data.body)>100000:
         raise HTTPException(400,'Provide one valid recipient, a subject and a message.')
-    if any('\n' in value or '\r' in value for value in (data.subject,data.in_reply_to,data.references)):
+    in_reply_to=mail_client.unfold_header(data.in_reply_to)
+    references=mail_client.unfold_header(data.references)
+    if '\n' in data.subject or '\r' in data.subject or in_reply_to is None or references is None:
         raise HTTPException(400,'Invalid message header.')
     try: html_body=rich_email.clean_fragment(data.html_body) if data.html_body is not None else None
     except ValueError as exc: raise HTTPException(400,str(exc))
@@ -629,9 +631,9 @@ def send_manual_mail(sender: str, data: ComposeMailInput):
     with Session() as db: display_name = mailbox_preferences(db,sender)['display_name']
     candidate_id=make_msgid()
     msg=EmailMessage(); msg['From']=formataddr((display_name,address)); msg['To']=recipient; msg['Subject']=data.subject; msg['Message-ID']=candidate_id; msg['Date']=formatdate(localtime=False)
-    if data.in_reply_to:
-        msg['In-Reply-To']=data.in_reply_to
-        msg['References']=(data.references+' '+data.in_reply_to).strip()
+    if in_reply_to:
+        msg['In-Reply-To']=in_reply_to
+        msg['References']=(references+' '+in_reply_to).strip()
     msg.set_content((rich_email.plain_text(html_body) if html_body is not None else data.body) or '[Image]')
     if html_body is not None:
         rendered,images=rich_email.mime_html(html_body)

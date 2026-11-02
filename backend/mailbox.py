@@ -24,6 +24,12 @@ def text_header(value):
     try: return str(make_header(decode_header(value or '')))
     except Exception: return str(value or '')
 
+def unfold_header(value):
+    """Unfold legal RFC header continuations and reject stray line breaks."""
+    value=re.sub(r'\r?\n[ \t]+',' ',str(value or '')).strip()
+    if '\r' in value or '\n' in value: return None
+    return re.sub(r'[ \t]+',' ',value)
+
 def safe_text(part):
     data=part.get_payload(decode=True)
     if data is None: return ''
@@ -44,7 +50,8 @@ def parsed(message):
     date=None
     try: date=parsedate_to_datetime(message.get('Date')).isoformat()
     except (ValueError,TypeError,OverflowError): pass
-    return {'from':text_header(message.get('From')),'to':text_header(message.get('To')),'subject':text_header(message.get('Subject')) or '(No subject)','date':date,'message_id':str(message.get('Message-ID') or ''),'references':str(message.get('References') or ''),'reply_to':getaddresses(message.get_all('Reply-To',[]) or message.get_all('From',[]))[0][1] if (message.get_all('Reply-To',[]) or message.get_all('From',[])) else ''}
+    references=' '.join(filter(None,(message.get('In-Reply-To',''),message.get('References',''))))
+    return {'from':text_header(message.get('From')),'to':text_header(message.get('To')),'subject':text_header(message.get('Subject')) or '(No subject)','date':date,'message_id':unfold_header(message.get('Message-ID')) or '','references':unfold_header(references) or '', 'reply_to':getaddresses(message.get_all('Reply-To',[]) or message.get_all('From',[]))[0][1] if (message.get_all('Reply-To',[]) or message.get_all('From',[])) else ''}
 
 def connect(address,password,host,port):
     client=imaplib.IMAP4_SSL(host,port,timeout=20)
