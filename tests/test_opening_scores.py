@@ -28,3 +28,15 @@ class OpeningScoreTests(unittest.TestCase):
         self.assertEqual(app.generation_status(lead_id)['state'],'completed')
         draft=app.lead(lead_id)['messages'][0];self.assertEqual(draft['opening_assessment']['score'],100)
         self.assertIn('uncertain',draft['opening_assessment']['caveats'])
+    def test_generation_receives_previous_research_for_reassessment(self):
+        lead_id=self.create_lead()
+        with app.Session.begin() as db:
+            lead=db.get(app.Lead,lead_id);lead.research='Status is uncertain';lead.research_sources='https://example.com/source'
+        try:
+            with patch.object(app.JOB_POOL,'submit') as submit:
+                app.generate_lead(lead_id,app.GenerateInput(sender='stefan'))
+            snapshot=submit.call_args.args[3]
+            self.assertEqual(snapshot['research'],'Status is uncertain')
+            self.assertEqual(snapshot['research_sources'],'https://example.com/source')
+        finally:
+            with app.JOB_LOCK: app.JOBS.pop(lead_id,None)

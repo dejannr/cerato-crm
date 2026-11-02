@@ -635,7 +635,7 @@ def generate_lead(id: int, data: GenerateInput):
         with Session() as db:
             obj=get_lead(db,id)
             if obj.status != 'new' or db.scalar(select(Message.id).where(Message.lead_id==id).limit(1)): raise HTTPException(409,'Only uncontacted new leads can be researched')
-            snapshot={k:getattr(obj,k) for k in ('id','company','city','category','website','linkedin','contact_name','person_email','company_email')}
+            snapshot={k:getattr(obj,k) for k in ('id','company','city','category','website','linkedin','contact_name','person_email','company_email','research','research_sources')}
         template=get_template(data.sender)
         JOBS[id]={'state':'running','message':'Researching this lead and preparing a draft…'}
         JOB_POOL.submit(run_generation,id,data.sender,snapshot,template)
