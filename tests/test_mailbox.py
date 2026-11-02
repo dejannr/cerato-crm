@@ -67,4 +67,22 @@ class MailboxTests(unittest.TestCase):
             data=app.ComposeMailInput(request_id=uuid4(),recipient='test@example.com',subject='Submission test',body='Hello')
             self.assertEqual(app.send_manual_mail('stefan',data)['status'],'uncertain')
 
+    def test_relay_send_preserves_sent_copy_and_idempotency(self):
+        key=Fernet.generate_key().decode(); FakeSMTP.sends=0
+        with patch.dict(app.os.environ,{'MAILBOX_ENCRYPTION_KEY':key,'MAIL_TRANSPORT':'relay','RELAY_URL':'https://relay.example/send','RELAY_TOKEN':'test-token'}),patch.object(client,'connect',return_value=FakeIMAP()),patch.object(app.mail_relay,'send',return_value=('sent',None)) as send,patch.object(app.smtplib,'SMTP_SSL',side_effect=AssertionError('Direct SMTP used')):
+            app.connect_mailbox('stefan',app.MailboxSetupInput(address='stefan@ceratosystems.com',password='not-a-real-password'))
+            data=app.ComposeMailInput(request_id=uuid4(),recipient='test@example.com',subject='Relay',body='Hello')
+            first=app.send_manual_mail('stefan',data); second=app.send_manual_mail('stefan',data)
+            self.assertEqual(first['status'],'sent'); self.assertEqual(second['status'],'sent'); self.assertEqual(send.call_count,1)
+            self.assertIn(b'\r\n',send.call_args.args[5])
+
+    def test_relay_uncertain_is_not_retried(self):
+        key=Fernet.generate_key().decode()
+        with patch.dict(app.os.environ,{'MAILBOX_ENCRYPTION_KEY':key,'MAIL_TRANSPORT':'relay','RELAY_URL':'https://relay.example/send','RELAY_TOKEN':'test-token'}),patch.object(client,'connect',return_value=FakeIMAP()),patch.object(app.mail_relay,'send',return_value=('uncertain','Check inbox')) as send:
+            app.connect_mailbox('stefan',app.MailboxSetupInput(address='stefan@ceratosystems.com',password='not-a-real-password'))
+            data=app.ComposeMailInput(request_id=uuid4(),recipient='test@example.com',subject='Relay',body='Hello')
+            self.assertEqual(app.send_manual_mail('stefan',data)['status'],'uncertain')
+            self.assertEqual(app.send_manual_mail('stefan',data)['status'],'uncertain')
+            self.assertEqual(send.call_count,1)
+
 if __name__=='__main__':unittest.main()
