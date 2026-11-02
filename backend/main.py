@@ -3,6 +3,7 @@ import base64
 import binascii
 import html
 import io
+import json
 import hashlib
 import hmac
 import secrets
@@ -10,7 +11,7 @@ import time
 import threading
 import uuid
 from concurrent.futures import ThreadPoolExecutor
-from backend.generator import generate
+from backend.generator import generate, CRITERIA
 from backend import mailbox as mail_client
 from backend import relay as mail_relay
 from backend import rich_email
@@ -71,6 +72,14 @@ class Message(Base):
     error: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
     sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+class OpeningAssessment(Base):
+    __tablename__ = 'opening_assessments'
+    message_id: Mapped[int] = mapped_column(ForeignKey('messages.id',ondelete='CASCADE'), primary_key=True)
+    score: Mapped[int] = mapped_column()
+    criteria_json: Mapped[str] = mapped_column(Text)
+    caveats: Mapped[str] = mapped_column(Text)
+    opening: Mapped[str] = mapped_column(Text)
+    body_hash: Mapped[str] = mapped_column(String)
 class MailboxCredential(Base):
     __tablename__ = 'mailbox_credentials'
     sender: Mapped[str] = mapped_column(String, primary_key=True)
@@ -449,7 +458,13 @@ def lead(id: int):
         obj=get_lead(db,id)
         history = db.scalars(select(Message).where(Message.lead_id==id).order_by(Message.created_at.desc(), Message.id.desc())).all()
         outbound = [x for x in reversed(history) if x.direction == 'outbound']
-        return {**serialize(obj), 'owner': outbound[0].sender if outbound else None, 'messages':[serialize(x) for x in history]}
+        assessments={a.message_id:a for a in db.scalars(select(OpeningAssessment).where(OpeningAssessment.message_id.in_([m.id for m in history]))).all()} if history else {}
+        messages=[]
+        for message in history:
+            item=serialize(message); assessment=assessments.get(message.id)
+            item['opening_assessment']={'score':assessment.score,'criteria':json.loads(assessment.criteria_json),'caveats':assessment.caveats,'opening':assessment.opening,'stale':assessment.body_hash!=hashlib.sha256(message.body.encode()).hexdigest() or assessment.opening not in message.body} if assessment else None
+            messages.append(item)
+        return {**serialize(obj), 'owner': outbound[0].sender if outbound else None, 'messages':messages}
 @app.patch('/api/leads/{id}')
 def update_lead(id: int, data: LeadUpdate):
     with Session.begin() as db:
@@ -547,32 +562,44 @@ def run_generation(id: int, sender: str, lead_snapshot: dict, template: dict):
         sources = result.get('sources', [])
         if not isinstance(sources, list): raise ValueError('Invalid research sources')
         urls = [u.strip() for u in sources if isinstance(u, str) and re.match(r'^https?://[^\s]+$', u.strip())]
-        research = str(result.get('research', '')).strip()[:12000]
-        if not research or not urls: raise ValueError('No sourced research returned')
-        # Retain research when the company does not provide enough information for personalization.
+        research = str(result.get('research') or '').strip()[:12000] or 'No verified company research was found.'
+        raw_criteria=result.get('criteria') if isinstance(result.get('criteria'),dict) else {}
+        criteria={}
+        for key in CRITERIA:
+            item=raw_criteria.get(key) if isinstance(raw_criteria.get(key),dict) else {}
+            value=item.get('score'); value=value if isinstance(value,int) and not isinstance(value,bool) else 0
+            criteria[key]={'score':max(0,min(5,value)),'reason':str(item.get('reason') or 'Not assessed.')[:500]}
+        caveats=str(result.get('caveats') or '').strip()[:2000]
+        if not urls:
+            criteria['evidence']={'score':0,'reason':'No supporting source was available.'}
+            caveats=(caveats+'\n' if caveats else '')+'No supporting source was available; review the opening before use.'
         with Session.begin() as db:
             obj = db.scalar(select(Lead).where(Lead.id == id).with_for_update())
             if not obj or obj.status != 'new' or db.scalar(select(Message.id).where(Message.lead_id == id).limit(1)):
                 raise ValueError('Lead changed while research was running; no draft was created')
             obj.research = research
             obj.research_sources = '\n'.join(urls[:20])
-            if result.get('ready') is not True:
-                outcome = {'state':'needs_review', 'message':str(result.get('reason') or 'Insufficient company research for personalization')[:1000]}
-            else:
-                recipient = next((str(x).strip() for x in (obj.person_email, obj.company_email) if x and valid_address(str(x).strip())), None)
-                if not recipient: raise ValueError('This lead needs a single valid email address to create a draft')
-                if db.get(Suppression, recipient.lower()): raise ValueError('This recipient is marked do not contact')
-                first = str(result.get('first_name','')).strip()
-                sentence = str(result.get('personalized_sentence','')).strip()
-                subject = (template['subject'] or str(result.get('subject',''))).strip()
-                if not first or not sentence or not subject or '\n' in subject or len(subject)>250: raise ValueError('The generated message is incomplete')
-                replacements={'{{first_name}}':first, '{{personalized_sentence}}':sentence, '{{company_name}}':obj.company, '{{sender_name}}':template['sender_name'], '{{sender_role}}':template['sender_role']}
-                body=template['body']
-                for key,value in replacements.items(): body=body.replace(key,value); subject=subject.replace(key,value)
-                if re.search(r'{{\s*[^{}]+\s*}}',body+subject): raise ValueError('The template contains unresolved placeholders')
-                message=Message(lead_id=id,direction='outbound',status='draft',sender=sender,recipient=recipient,subject=subject,body=body)
-                db.add(message); db.flush(); obj.status='review'
-                outcome = {'state':'completed','message':'Draft created. Open the conversation to review it.'}
+            recipient = next((str(x).strip() for x in (obj.person_email, obj.company_email) if x and valid_address(str(x).strip())), None)
+            if not recipient: raise ValueError('This lead needs a single valid email address to create a draft')
+            if db.get(Suppression, recipient.lower()): raise ValueError('This recipient is marked do not contact')
+            first = str(result.get('first_name') or '').strip() or ((obj.contact_name or '').split() or ['there'])[0]
+            sentence = str(result.get('personalized_sentence') or '').strip()
+            if not sentence:
+                sentence='How do you currently coordinate transport bookings and shipment updates?'
+                for key in CRITERIA: criteria[key]={'score':0,'reason':'A generic fallback was used.'}
+                caveats=(caveats+'\n' if caveats else '')+'No personalized opening was returned; a generic question was used.'
+            subject = (template['subject'] or str(result.get('subject') or '')).strip() or 'A short logistics walkthrough'
+            if '\n' in subject or '\r' in subject or len(subject)>250: raise ValueError('The generated subject is invalid')
+            replacements={'{{first_name}}':first, '{{personalized_sentence}}':sentence, '{{company_name}}':obj.company, '{{sender_name}}':template['sender_name'], '{{sender_role}}':template['sender_role']}
+            body=template['body']
+            for key,value in replacements.items(): body=body.replace(key,value); subject=subject.replace(key,value)
+            if re.search(r'{{\s*[^{}]+\s*}}',body+subject): raise ValueError('The template contains unresolved placeholders')
+            message=Message(lead_id=id,direction='outbound',status='draft',sender=sender,recipient=recipient,subject=subject,body=body)
+            db.add(message); db.flush(); obj.status='review'
+            score=sum(v['score'] for v in criteria.values())*4
+            if not urls: score=min(score,49)
+            db.add(OpeningAssessment(message_id=message.id,score=score,criteria_json=json.dumps(criteria),caveats=caveats,opening=sentence,body_hash=hashlib.sha256(body.encode()).hexdigest()))
+            outcome = {'state':'completed','message':'Draft created. Review the opening and its quality score.'}
         with JOB_LOCK: JOBS[id] = outcome
     except Exception as exc:
         with JOB_LOCK: JOBS[id] = {'state':'failed', 'message':str(exc)[:500]}
