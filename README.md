@@ -71,6 +71,8 @@ The interface checks for lead and conversation updates every five seconds while 
 
 Select Stefan or Andrija, open **Inbox**, then use **Connect mailbox** and enter that mailbox's Purelymail password or app password. The app tests IMAP before storing an encrypted credential; it never displays the password again. It reads the latest 50 messages directly from the provider, refreshes while the Inbox is open, and does not mark them read. HTML messages are shown as plain text. Attachment names are shown; open or download them in your regular email client.
 
+In Inbox → Email settings, edit each mailbox’s sender display name and signature. New messages and replies can include that signature, with a per-message option to turn it off. The display name is separate from the outreach template name.
+
 The Inbox supports manually composed real messages and replies after an explicit confirmation. Accepted messages are appended to the provider's Sent folder when possible. If the send result is uncertain, check Purelymail before trying again. Outreach lead drafts and simulations remain separate and cannot be sent through the outreach workflow. Inbox messages are not yet automatically linked to leads.
 
 Credentials are encrypted with `MAILBOX_ENCRYPTION_KEY`, a Fernet key kept outside the database in `.env` locally and `/etc/cerato-crm.env` on the droplet. Keep this key private and back it up securely: losing or changing it requires reconnecting the mailboxes. Generate a key with `.venv/bin/python -c 'from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())'`. The existing CRM login is shared; anyone with access can open either mailbox.

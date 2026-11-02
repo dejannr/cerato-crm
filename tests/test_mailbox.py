@@ -1,4 +1,6 @@
 import unittest
+import email
+from email.utils import parseaddr
 from email.message import EmailMessage
 from unittest.mock import patch
 from uuid import uuid4
@@ -40,7 +42,7 @@ class MailboxTests(unittest.TestCase):
         self.assertIn('Hello',client.body_text(msg)); self.assertNotIn('danger',client.body_text(msg))
     def test_credentials_encrypted_and_send_idempotent(self):
         key=Fernet.generate_key().decode(); FakeSMTP.sends=0
-        with patch.dict(app.os.environ,{'MAILBOX_ENCRYPTION_KEY':key}),patch.object(client,'connect',return_value=FakeIMAP()),patch.object(app.smtplib,'SMTP_SSL',FakeSMTP):
+        with patch.dict(app.os.environ,{'MAILBOX_ENCRYPTION_KEY':key,'MAIL_TRANSPORT':'smtp'}),patch.object(client,'connect',return_value=FakeIMAP()),patch.object(app.smtplib,'SMTP_SSL',FakeSMTP):
             app.connect_mailbox('stefan',app.MailboxSetupInput(address='stefan@ceratosystems.com',password='not-a-real-password'))
             with app.Session() as db: self.assertNotIn('not-a-real-password',db.get(app.MailboxCredential,'stefan').encrypted_password)
             self.assertEqual(app.mailbox('stefan')[1],'not-a-real-password')
@@ -50,9 +52,27 @@ class MailboxTests(unittest.TestCase):
             changed=data.model_copy(update={'body':'Different'})
             with self.assertRaises(app.HTTPException):app.send_manual_mail('stefan',changed)
 
+    def test_mailbox_defaults_and_editable_signature(self):
+        defaults=app.settings()['mailboxes']
+        self.assertEqual(defaults[0]['display_name'],'Stefan Radovanovic')
+        self.assertEqual(defaults[1]['display_name'],'Andrija Ilic')
+        app.update_mailbox_preferences('adrija',app.MailboxPreferencesInput(display_name='Andrija Ilic',signature='Regards,\nAndrija'))
+        self.assertEqual(app.settings()['mailboxes'][1]['signature'],'Regards,\nAndrija')
+        with self.assertRaises(app.HTTPException):app.update_mailbox_preferences('stefan',app.MailboxPreferencesInput(display_name='Stefan\nBcc: bad@example.com',signature=''))
+
+    def test_sender_display_name_is_in_relay_message(self):
+        key=Fernet.generate_key().decode()
+        with patch.dict(app.os.environ,{'MAILBOX_ENCRYPTION_KEY':key,'MAIL_TRANSPORT':'relay','RELAY_URL':'https://relay.example/send','RELAY_TOKEN':'test-token'}),patch.object(client,'connect',return_value=FakeIMAP()),patch.object(app.mail_relay,'send',return_value=('sent',None)) as transport:
+            app.connect_mailbox('stefan',app.MailboxSetupInput(address='stefan@ceratosystems.com',password='not-a-real-password'))
+            data=app.ComposeMailInput(request_id=uuid4(),recipient='test@example.com',subject='Display',body='Hello\n\nBest,\nStefan')
+            self.assertEqual(app.send_manual_mail('stefan',data)['status'],'sent')
+            raw=transport.call_args.args[5]; msg=email.message_from_bytes(raw)
+            self.assertEqual(parseaddr(msg['From']),('Stefan Radovanovic','stefan@ceratosystems.com'))
+            self.assertIn('Best,',msg.get_payload(decode=True).decode())
+
     def test_smtp_connection_failure_is_not_sent(self):
         key=Fernet.generate_key().decode()
-        with patch.dict(app.os.environ,{'MAILBOX_ENCRYPTION_KEY':key}),patch.object(client,'connect',return_value=FakeIMAP()),patch.object(app.smtplib,'SMTP_SSL',side_effect=TimeoutError('blocked')):
+        with patch.dict(app.os.environ,{'MAILBOX_ENCRYPTION_KEY':key,'MAIL_TRANSPORT':'smtp'}),patch.object(client,'connect',return_value=FakeIMAP()),patch.object(app.smtplib,'SMTP_SSL',side_effect=TimeoutError('blocked')):
             app.connect_mailbox('stefan',app.MailboxSetupInput(address='stefan@ceratosystems.com',password='not-a-real-password'))
             data=app.ComposeMailInput(request_id=uuid4(),recipient='test@example.com',subject='Connection test',body='Hello')
             result=app.send_manual_mail('stefan',data)
@@ -62,7 +82,7 @@ class MailboxTests(unittest.TestCase):
         class InterruptedSMTP(FakeSMTP):
             def send_message(self,msg): raise TimeoutError('connection lost during submission')
         key=Fernet.generate_key().decode()
-        with patch.dict(app.os.environ,{'MAILBOX_ENCRYPTION_KEY':key}),patch.object(client,'connect',return_value=FakeIMAP()),patch.object(app.smtplib,'SMTP_SSL',InterruptedSMTP):
+        with patch.dict(app.os.environ,{'MAILBOX_ENCRYPTION_KEY':key,'MAIL_TRANSPORT':'smtp'}),patch.object(client,'connect',return_value=FakeIMAP()),patch.object(app.smtplib,'SMTP_SSL',InterruptedSMTP):
             app.connect_mailbox('stefan',app.MailboxSetupInput(address='stefan@ceratosystems.com',password='not-a-real-password'))
             data=app.ComposeMailInput(request_id=uuid4(),recipient='test@example.com',subject='Submission test',body='Hello')
             self.assertEqual(app.send_manual_mail('stefan',data)['status'],'uncertain')

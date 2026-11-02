@@ -19,7 +19,7 @@ from datetime import datetime, timezone
 from email.header import decode_header, make_header
 from email.message import EmailMessage
 from email.policy import SMTP
-from email.utils import formatdate, getaddresses, make_msgid, parsedate_to_datetime
+from email.utils import formataddr, formatdate, getaddresses, make_msgid, parsedate_to_datetime
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -70,6 +70,12 @@ class MailboxCredential(Base):
     sender: Mapped[str] = mapped_column(String, primary_key=True)
     address: Mapped[str] = mapped_column(String)
     encrypted_password: Mapped[str] = mapped_column(Text)
+
+class MailboxPreferences(Base):
+    __tablename__ = 'mailbox_preferences'
+    sender: Mapped[str] = mapped_column(String, primary_key=True)
+    display_name: Mapped[str] = mapped_column(String)
+    signature: Mapped[str] = mapped_column(Text)
 
 class MailSubmission(Base):
     __tablename__ = 'mail_submissions'
@@ -285,6 +291,30 @@ def update_template(data: TemplateInput, sender: str = 'stefan'):
 
 @app.get('/api/health')
 def health(): return {'ok': True}
+def mailbox_preferences(db, sender):
+    saved = db.get(MailboxPreferences, sender)
+    if saved: return {'display_name':saved.display_name, 'signature':saved.signature}
+    if sender == 'stefan': return {'display_name':'Stefan Radovanovic','signature':'Best,\nStefan\nCTO, Cerato Systems'}
+    if sender == 'adrija': return {'display_name':'Andrija Ilic','signature':'Best,\nAndrija\nCBO, Cerato Systems'}
+    raise HTTPException(400,'Choose Stefan or Andrija')
+
+class MailboxPreferencesInput(BaseModel):
+    display_name: str
+    signature: str = ''
+
+@app.put('/api/mail/{sender}/preferences')
+def update_mailbox_preferences(sender: str, data: MailboxPreferencesInput):
+    template_id(sender)
+    name=data.display_name.strip()
+    if not name or len(name)>120 or '\n' in name or '\r' in name or any(ord(c)<32 for c in name):
+        raise HTTPException(400,'Enter a valid single-line sender name.')
+    if len(data.signature)>10000: raise HTTPException(400,'Signature is too long.')
+    with Session.begin() as db:
+        saved=db.get(MailboxPreferences,sender)
+        if not saved: db.add(MailboxPreferences(sender=sender,display_name=name,signature=data.signature))
+        else: saved.display_name=name; saved.signature=data.signature
+    return {'display_name':name,'signature':data.signature}
+
 @app.get('/api/settings')
 def settings():
     with Session() as db:
@@ -292,7 +322,7 @@ def settings():
         for sender in ('stefan','adrija'):
             saved=db.get(MailboxCredential,sender)
             default='stefan@ceratosystems.com' if sender=='stefan' else 'andrija@ceratosystems.com'
-            result.append({'id':sender,'email':saved.address if saved else (os.getenv(sender.upper()+'_EMAIL','').strip() or default),'configured':bool(saved or os.getenv(sender.upper()+'_PASSWORD'))})
+            result.append({'id':sender,'email':saved.address if saved else (os.getenv(sender.upper()+'_EMAIL','').strip() or default),'configured':bool(saved or os.getenv(sender.upper()+'_PASSWORD')),**mailbox_preferences(db,sender)})
         return {'mailboxes':result,'mail_setup_available':bool(os.getenv('MAILBOX_ENCRYPTION_KEY'))}
 @app.post('/api/import')
 def import_leads():
@@ -574,7 +604,8 @@ def send_manual_mail(sender: str, data: ComposeMailInput):
         if db.get(Suppression,recipient.lower()): raise HTTPException(409,'This address is marked do not contact.')
         item=MailSubmission(id=str(data.request_id),sender=sender,recipient=recipient,subject=data.subject,body=data.body,status='sending',message_id=make_msgid())
         db.add(item); db.flush(); message_id=item.message_id
-    msg=EmailMessage(); msg['From']=address; msg['To']=recipient; msg['Subject']=data.subject; msg['Message-ID']=message_id; msg['Date']=formatdate(localtime=False)
+    with Session() as db: display_name = mailbox_preferences(db,sender)['display_name']
+    msg=EmailMessage(); msg['From']=formataddr((display_name,address)); msg['To']=recipient; msg['Subject']=data.subject; msg['Message-ID']=message_id; msg['Date']=formatdate(localtime=False)
     if data.in_reply_to:
         msg['In-Reply-To']=data.in_reply_to
         msg['References']=(data.references+' '+data.in_reply_to).strip()
