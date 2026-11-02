@@ -1,5 +1,8 @@
 import email
 import base64
+import binascii
+import html
+import io
 import hashlib
 import hmac
 import secrets
@@ -32,6 +35,7 @@ from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from openpyxl import load_workbook
 from pydantic import BaseModel
+from PIL import Image, ImageDraw, ImageOps, UnidentifiedImageError
 from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text, create_engine, delete, func, or_, select
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, sessionmaker
 
@@ -83,6 +87,19 @@ class MailboxRichSignature(Base):
     __tablename__ = 'mailbox_rich_signatures'
     sender: Mapped[str] = mapped_column(String, primary_key=True)
     html: Mapped[str] = mapped_column(Text)
+
+class SignatureSettings(Base):
+    __tablename__ = 'signature_settings'
+    sender: Mapped[str] = mapped_column(String, primary_key=True)
+    name: Mapped[str] = mapped_column(String)
+    title: Mapped[str] = mapped_column(String)
+    email: Mapped[str] = mapped_column(String)
+    photo_id: Mapped[str | None] = mapped_column(String)
+
+class SignaturePhoto(Base):
+    __tablename__ = 'signature_photos'
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    png_base64: Mapped[str] = mapped_column(Text)
 
 class MailRichContent(Base):
     __tablename__ = 'mail_rich_content'
@@ -172,7 +189,8 @@ async def require_auth(request: Request, call_next):
             return JSONResponse({'detail':'Origin not allowed'}, status_code=403)
         if request.headers.get('sec-fetch-site') == 'cross-site':
             return JSONResponse({'detail':'Cross-site request rejected'}, status_code=403)
-    if path not in ('/api/auth/status', '/api/auth/login') and not session_valid(request.cookies.get('cerato_session', '')):
+    public_photo = request.method in ('GET','HEAD') and re.fullmatch(r'/api/signature-images/(?:stefan-default|[0-9a-f]{64})\.png',path)
+    if path not in ('/api/auth/status', '/api/auth/login') and not public_photo and not session_valid(request.cookies.get('cerato_session', '')):
         return JSONResponse({'detail':'Login required'}, status_code=401)
     return await call_next(request)
 
@@ -303,6 +321,68 @@ def update_template(data: TemplateInput, sender: str = 'stefan'):
 
 @app.get('/api/health')
 def health(): return {'ok': True}
+
+def signature_settings(db, sender):
+    template_id(sender)
+    saved=db.get(SignatureSettings,sender)
+    if saved: return {'name':saved.name,'title':saved.title,'email':saved.email,'photo_id':saved.photo_id}
+    return {'name':'Stefan' if sender=='stefan' else 'Andrija','title':'CTO' if sender=='stefan' else 'CBO','email':('stefan' if sender=='stefan' else 'andrija')+'@ceratosystems.com','photo_id':'stefan-default' if sender=='stefan' else None}
+
+def signature_html(profile):
+    name=html.escape(profile['name']); title=html.escape(profile['title']); address=html.escape(profile['email'],quote=True)
+    origin=os.getenv('CRM_ORIGIN','http://127.0.0.1:8000').rstrip('/')
+    photo=profile.get('photo_id')
+    photo_cell=(f'<td style="padding-right:18px;vertical-align:middle"><img src="{html.escape(origin,quote=True)}/api/signature-images/{photo}.png" alt="{name}" width="85" height="85" style="display:block;width:85px;height:85px;border-radius:50%"></td>' if photo else '')
+    divider='padding-left:18px;border-left:2px solid #2563eb;' if photo else ''
+    return (f'<table cellpadding="0" cellspacing="0" border="0" style="font-family:Arial,Helvetica,sans-serif;color:#1f2937"><tr><td colspan="2" style="padding-bottom:16px;font-size:14px">Best,</td></tr><tr>{photo_cell}<td style="{divider}vertical-align:middle"><div style="font-size:17px;font-weight:700;color:#111827;margin-bottom:5px">{name}</div><div style="font-size:13px;color:#4b5563;margin-bottom:7px">{title} <span style="color:#9ca3af">|</span> Cerato Systems</div><a href="mailto:{address}" style="font-size:13px;color:#2563eb;text-decoration:none">{address}</a></td></tr></table>')
+
+class SignatureSettingsInput(BaseModel):
+    name: str
+    title: str
+    email: str
+    photo: str | None = None
+    remove_photo: bool = False
+
+@app.get('/api/signature-images/{photo_id}.png')
+def signature_photo(photo_id: str):
+    if photo_id=='stefan-default': data=(ROOT/'backend/assets/stefan.png').read_bytes()
+    elif re.fullmatch(r'[0-9a-f]{64}',photo_id):
+        with Session() as db:
+            saved=db.get(SignaturePhoto,photo_id)
+            if not saved: raise HTTPException(404,'Photo not found')
+            data=base64.b64decode(saved.png_base64)
+    else: raise HTTPException(404,'Photo not found')
+    return Response(data,media_type='image/png',headers={'Cache-Control':'public, max-age=31536000, immutable','X-Content-Type-Options':'nosniff'})
+
+@app.put('/api/mail/{sender}/signature-settings')
+def update_signature_settings(sender: str, data: SignatureSettingsInput):
+    template_id(sender)
+    name=data.name.strip(); title=data.title.strip(); address=data.email.strip()
+    if any(not v or len(v)>100 or any(ord(c)<32 for c in v) for v in (name,title)) or not valid_address(address):
+        raise HTTPException(400,'Enter a valid name, title and email address.')
+    photo_id=None; encoded=None
+    if data.photo:
+        try:
+            if len(data.photo)>7000000: raise ValueError('Image is too large.')
+            raw=base64.b64decode(data.photo,validate=True)
+            image=Image.open(io.BytesIO(raw))
+            if image.width*image.height>20000000 or image.format not in ('PNG','JPEG','WEBP','GIF'): raise ValueError('Unsupported image.')
+            image=ImageOps.fit(ImageOps.exif_transpose(image).convert('RGB'),(340,340),method=Image.Resampling.LANCZOS,centering=(0.5,0.25)).convert('RGBA')
+            mask=Image.new('L',(340,340)); ImageDraw.Draw(mask).ellipse((0,0,339,339),fill=255); image.putalpha(mask)
+            output=io.BytesIO(); image.resize((170,170),Image.Resampling.LANCZOS).save(output,'PNG',optimize=True)
+            blob=output.getvalue(); photo_id=hashlib.sha256(blob).hexdigest(); encoded=base64.b64encode(blob).decode()
+        except (ValueError,binascii.Error,UnidentifiedImageError,OSError,Image.DecompressionBombError): raise HTTPException(400,'Choose a valid image under 5 MB.')
+    with Session.begin() as db:
+        current=signature_settings(db,sender); saved=db.get(SignatureSettings,sender)
+        if not saved:
+            saved=SignatureSettings(sender=sender,name=name,title=title,email=address,photo_id=current['photo_id']); db.add(saved)
+        saved.name=name; saved.title=title; saved.email=address
+        if data.remove_photo: saved.photo_id=None
+        if photo_id:
+            saved.photo_id=photo_id
+            if not db.get(SignaturePhoto,photo_id): db.add(SignaturePhoto(id=photo_id,png_base64=encoded))
+        db.flush(); result=signature_settings(db,sender)
+    return {**result,'html':signature_html(result)}
 def mailbox_preferences(db, sender):
     saved = db.get(MailboxPreferences, sender)
     if saved: result={'display_name':saved.display_name, 'signature':saved.signature}
@@ -347,7 +427,8 @@ def settings():
         for sender in ('stefan','adrija'):
             saved=db.get(MailboxCredential,sender)
             default='stefan@ceratosystems.com' if sender=='stefan' else 'andrija@ceratosystems.com'
-            result.append({'id':sender,'email':saved.address if saved else (os.getenv(sender.upper()+'_EMAIL','').strip() or default),'configured':bool(saved or os.getenv(sender.upper()+'_PASSWORD')),**mailbox_preferences(db,sender)})
+            profile=signature_settings(db,sender)
+            result.append({'id':sender,'email':saved.address if saved else (os.getenv(sender.upper()+'_EMAIL','').strip() or default),'configured':bool(saved or os.getenv(sender.upper()+'_PASSWORD')),**mailbox_preferences(db,sender),'signature_settings':profile,'signature_preview':signature_html(profile)})
         return {'mailboxes':result,'mail_setup_available':bool(os.getenv('MAILBOX_ENCRYPTION_KEY'))}
 @app.post('/api/import')
 def import_leads():
@@ -568,6 +649,7 @@ class ComposeMailInput(BaseModel):
     subject: str
     body: str
     html_body: str | None = None
+    include_signature: bool = False
     in_reply_to: str = ''
     references: str = ''
 
@@ -627,14 +709,19 @@ def send_manual_mail(sender: str, data: ComposeMailInput):
     try: html_body=rich_email.clean_fragment(data.html_body) if data.html_body is not None else None
     except ValueError as exc: raise HTTPException(400,str(exc))
     if not data.body.strip() and (not html_body or '<img' not in html_body): raise HTTPException(400,'Provide a message.')
-    # Include an image as a related MIME part, not an external tracking URL.
-    with Session() as db: display_name = mailbox_preferences(db,sender)['display_name']
+    with Session() as db:
+        display_name=mailbox_preferences(db,sender)['display_name']
+        profile=signature_settings(db,sender) if data.include_signature else None
+    if profile:
+        html_body=(html_body if html_body is not None else rich_email.plain_to_html(data.body))+'<br><br>'+signature_html(profile)
     candidate_id=make_msgid()
     msg=EmailMessage(); msg['From']=formataddr((display_name,address)); msg['To']=recipient; msg['Subject']=data.subject; msg['Message-ID']=candidate_id; msg['Date']=formatdate(localtime=False)
     if in_reply_to:
         msg['In-Reply-To']=in_reply_to
         msg['References']=(references+' '+in_reply_to).strip()
-    msg.set_content((rich_email.plain_text(html_body) if html_body is not None else data.body) or '[Image]')
+    plain=(rich_email.plain_text(rich_email.clean_fragment(data.html_body)) if data.html_body is not None else data.body)
+    if profile: plain+='\n\nBest,\n'+profile['name']+'\n'+profile['title']+' | Cerato Systems\n'+profile['email']
+    msg.set_content(plain or '[Image]')
     if html_body is not None:
         rendered,images=rich_email.mime_html(html_body)
         msg.add_alternative(rendered,subtype='html')
