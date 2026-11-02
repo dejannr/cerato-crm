@@ -28,6 +28,12 @@ class OpeningScoreTests(unittest.TestCase):
         self.assertEqual(app.generation_status(lead_id)['state'],'completed')
         draft=app.lead(lead_id)['messages'][0];self.assertEqual(draft['opening_assessment']['score'],100)
         self.assertIn('uncertain',draft['opening_assessment']['caveats'])
+    def test_observation_or_two_sentence_opening_is_kept(self):
+        for opening in ('Your booking page asks customers to email order details.',
+                        'Your booking page asks customers to email orders. Curious how those details reach the planning team.'):
+            lead_id=self.create_lead();result=self.result(['https://example.com/booking']);result['personalized_sentence']=opening
+            with patch.object(app,'generate',return_value=result): app.run_generation(lead_id,'stefan',{},self.template())
+            self.assertIn(opening,app.lead(lead_id)['messages'][0]['body'])
     def test_generation_receives_previous_research_for_reassessment(self):
         lead_id=self.create_lead()
         with app.Session.begin() as db:

@@ -18,7 +18,7 @@ class ResearchSkillTests(unittest.TestCase):
         self.assertEqual(set(result['criteria']),set(generator.CRITERIA))
         self.assertIn(generator.RESEARCH_SKILL.read_text(encoding='utf-8'),captured['input'])
         self.assertIn('Previous source reports uncertain status',captured['input'])
-        self.assertIn('generic question does not become distinctive',captured['input'])
+        self.assertIn('a question is not mandatory',captured['input'])
         self.assertIn('--search',captured['args'])
         self.assertIn('--disable',captured['args'])
     def test_missing_skill_stops_generation(self):
