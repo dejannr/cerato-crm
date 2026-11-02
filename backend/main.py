@@ -494,10 +494,16 @@ def update_draft(id: int, data: DraftInput):
 def delete_draft(id:int):
     with Session.begin() as db:
         obj=db.get(Message,id)
-        if not obj or obj.status != 'draft': raise HTTPException(404,'Draft not found')
-        lead=get_lead(db,obj.lead_id); db.delete(obj); db.flush()
-        if lead.status=='review' and not db.scalar(select(Message.id).where(Message.lead_id==lead.id,Message.status=='draft').limit(1)): lead.status='new'
-    return {'ok':True}
+        if not obj or obj.status != 'draft' or obj.direction != 'outbound': raise HTTPException(404,'Draft not found')
+        lead=db.scalar(select(Lead).where(Lead.id==obj.lead_id).with_for_update())
+        obj=db.scalar(select(Message).where(Message.id==id).with_for_update())
+        if not obj or obj.status != 'draft' or obj.direction != 'outbound': raise HTTPException(404,'Draft not found')
+        db.delete(obj); db.flush()
+        if lead.status=='review' and not db.scalar(select(Message.id).where(Message.lead_id==lead.id).limit(1)): lead.status='new'
+        lead_id=lead.id; status=lead.status
+    with JOB_LOCK:
+        if JOBS.get(lead_id,{}).get('state') != 'running': JOBS.pop(lead_id,None)
+    return {'ok':True,'lead_status':status}
 @app.post('/api/drafts/{id}/send')
 def send(id: int):
     raise HTTPException(403, 'Real email sending is disabled while simulation mode is active')
