@@ -15,7 +15,7 @@ def send(url, token, username, password, recipient, raw_email):
     if parsed.scheme != 'https' or not parsed.hostname or parsed.username or parsed.password or parsed.fragment or parsed.query or parsed.path != '/send' or not token:
         return 'failed', 'Not sent: the secure email relay is not configured correctly.'
     payload=json.dumps({'username':username,'password':password,'recipient':recipient,'raw_email':base64.b64encode(raw_email).decode('ascii')}).encode('utf-8')
-    request=urllib.request.Request(url,data=payload,method='POST',headers={'Authorization':'Bearer '+token,'Content-Type':'application/json','Accept':'application/json'})
+    request=urllib.request.Request(url,data=payload,method='POST',headers={'Authorization':'Bearer '+token,'Content-Type':'application/json','Accept':'application/json','User-Agent':'CeratoCRM/1.0'})
     opener=urllib.request.build_opener(NoRedirect())
     try:
         with opener.open(request,timeout=35) as response:

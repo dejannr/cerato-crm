@@ -22,6 +22,7 @@ class RelayTests(unittest.TestCase):
         self.assertEqual((status,warning),('sent',None))
         self.assertEqual(json.loads(opener.request.data)['raw_email'],'aGVsbG8=')
         self.assertEqual(opener.request.get_header('Authorization'),'Bearer secret-token')
+        self.assertEqual(opener.request.get_header('User-agent'),'CeratoCRM/1.0')
     def test_refuses_non_https_or_redirect_address(self):
         for url in ('http://relay.example/send','https://relay.example/send?secret=1','https://user:pass@relay.example/send'):
             self.assertEqual(relay.send(url,'token','user','pw','x@example.com',b'x')[0],'failed')
