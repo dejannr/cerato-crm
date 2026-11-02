@@ -28,7 +28,7 @@ class SignatureSettingsTests(unittest.TestCase):
             self.assertEqual(app.send_manual_mail('stefan',data)['status'],'sent')
             msg=email.message_from_bytes(transport.call_args.args[5]); html=next(p for p in msg.walk() if p.get_content_type()=='text/html').get_payload(decode=True).decode()
             self.assertIn('https://crm.ceratosystems.com/api/signature-images/'+settings['photo_id']+'.png',html)
-            self.assertIn('border-left:2px solid #2563eb',html); self.assertIn('mailto:stefan@ceratosystems.com',html)
+            self.assertIn('border-left:1px solid #cbd5d1',html); self.assertIn('mailto:stefan@ceratosystems.com',html)
             plain=next(p for p in msg.walk() if p.get_content_type()=='text/plain').get_payload(decode=True).decode();self.assertIn('CTO | Cerato Systems',plain)
             data=data.model_copy(update={'request_id':uuid4(),'include_signature':False});app.send_manual_mail('stefan',data)
             msg=email.message_from_bytes(transport.call_args.args[5]); html=next(p for p in msg.walk() if p.get_content_type()=='text/html').get_payload(decode=True).decode();self.assertNotIn('Cerato Systems',html)

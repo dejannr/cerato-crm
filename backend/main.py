@@ -333,8 +333,8 @@ def signature_html(profile):
     origin=os.getenv('CRM_ORIGIN','http://127.0.0.1:8000').rstrip('/')
     photo=profile.get('photo_id')
     photo_cell=(f'<td style="padding-right:18px;vertical-align:middle"><img src="{html.escape(origin,quote=True)}/api/signature-images/{photo}.png" alt="{name}" width="85" height="85" style="display:block;width:85px;height:85px;border-radius:50%"></td>' if photo else '')
-    divider='padding-left:18px;border-left:2px solid #2563eb;' if photo else ''
-    return (f'<table cellpadding="0" cellspacing="0" border="0" style="font-family:Arial,Helvetica,sans-serif;color:#1f2937"><tr><td colspan="2" style="padding-bottom:16px;font-size:14px">Best,</td></tr><tr>{photo_cell}<td style="{divider}vertical-align:middle"><div style="font-size:17px;font-weight:700;color:#111827;margin-bottom:5px">{name}</div><div style="font-size:13px;color:#4b5563;margin-bottom:7px">{title} <span style="color:#9ca3af">|</span> Cerato Systems</div><a href="mailto:{address}" style="font-size:13px;color:#2563eb;text-decoration:none">{address}</a></td></tr></table>')
+    divider='padding-left:18px;border-left:1px solid #cbd5d1;' if photo else ''
+    return (f'<table cellpadding="0" cellspacing="0" border="0" style="font-family:Arial,Helvetica,sans-serif;color:#1f2937"><tr><td colspan="2" style="padding-bottom:16px;font-size:14px">Best,</td></tr><tr>{photo_cell}<td style="{divider}vertical-align:middle"><div style="font-size:17px;font-weight:700;color:#111827;margin-bottom:5px">{name}</div><div style="font-size:13px;color:#4b5563;margin-bottom:7px">{title} <span style="color:#9ca3af">|</span> Cerato Systems</div><a href="mailto:{address}" style="font-size:13px;color:#374151;text-decoration:none">{address}</a></td></tr></table>')
 
 class SignatureSettingsInput(BaseModel):
     name: str
