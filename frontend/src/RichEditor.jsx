@@ -1,0 +1,15 @@
+import React,{useEffect,useRef,useState} from 'react';
+import {useEditor,EditorContent} from '@tiptap/react';
+import StarterKit from '@tiptap/starter-kit';
+import Image from '@tiptap/extension-image';
+
+export default function RichEditor({initialHtml,onChange,disabled=false,label='Message'}) {
+ const input=useRef(null),[warning,setWarning]=useState('');
+ const editor=useEditor({extensions:[StarterKit.configure({heading:false,codeBlock:false,horizontalRule:false,link:{openOnClick:false}}),Image.configure({inline:true,allowBase64:true})],content:initialHtml||'<p></p>',editable:!disabled,onUpdate:({editor})=>onChange({html:editor.getHTML(),text:editor.getText({blockSeparator:'\n\n'})}),editorProps:{attributes:{'aria-label':label,'role':'textbox','aria-multiline':'true'}}});
+ useEffect(()=>{editor?.setEditable(!disabled)},[editor,disabled]);
+ const button=(title,text,action,active=false)=><button type="button" title={title} aria-label={title} aria-pressed={active} className={active?'active':''} onMouseDown={e=>e.preventDefault()} onClick={action} disabled={disabled}>{text}</button>;
+ function addLink(){const value=window.prompt('Enter an https:// or http:// link');if(value===null)return;if(!/^https?:\/\//i.test(value)){setWarning('Enter a link beginning with https:// or http://.');return}setWarning('');editor.chain().focus().extendMarkRange('link').setLink({href:value}).run()}
+ function imageChanged(e){const file=e.target.files?.[0];e.target.value='';if(!file)return;if(!['image/png','image/jpeg','image/gif','image/webp'].includes(file.type)){setWarning('Choose a PNG, JPEG, GIF or WebP image.');return}if(file.size>50000){setWarning('Choose an image smaller than 50 KB. All images in one email must total 60 KB or less.');return}const reader=new FileReader();reader.onload=()=>{editor.chain().focus().setImage({src:reader.result,alt:file.name}).run();setWarning('')};reader.onerror=()=>setWarning('Could not read this image.');reader.readAsDataURL(file)}
+ if(!editor)return null;
+ return <div className={'rich-editor '+(disabled?'disabled':'')}><div className="rich-toolbar" role="toolbar" aria-label={label+' formatting'}>{button('Bold',<strong>B</strong>,()=>editor.chain().focus().toggleBold().run(),editor.isActive('bold'))}{button('Italic',<em>I</em>,()=>editor.chain().focus().toggleItalic().run(),editor.isActive('italic'))}{button('Underline',<u>U</u>,()=>editor.chain().focus().toggleUnderline().run(),editor.isActive('underline'))}<span className="rich-divider"/>{button('Bulleted list','• List',()=>editor.chain().focus().toggleBulletList().run(),editor.isActive('bulletList'))}{button('Numbered list','1. List',()=>editor.chain().focus().toggleOrderedList().run(),editor.isActive('orderedList'))}{button('Insert link','Link',addLink,editor.isActive('link'))}{button('Insert image','Image',()=>input.current?.click())}<input ref={input} type="file" accept="image/png,image/jpeg,image/gif,image/webp" hidden onChange={imageChanged}/></div><EditorContent editor={editor}/>{warning&&<p className="rich-warning" role="alert">{warning}</p>}</div>
+}

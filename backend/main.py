@@ -1,4 +1,5 @@
 import email
+import base64
 import hashlib
 import hmac
 import secrets
@@ -9,6 +10,7 @@ from concurrent.futures import ThreadPoolExecutor
 from backend.generator import generate
 from backend import mailbox as mail_client
 from backend import relay as mail_relay
+from backend import rich_email
 from collections import defaultdict, deque
 import imaplib
 import os
@@ -76,6 +78,16 @@ class MailboxPreferences(Base):
     sender: Mapped[str] = mapped_column(String, primary_key=True)
     display_name: Mapped[str] = mapped_column(String)
     signature: Mapped[str] = mapped_column(Text)
+
+class MailboxRichSignature(Base):
+    __tablename__ = 'mailbox_rich_signatures'
+    sender: Mapped[str] = mapped_column(String, primary_key=True)
+    html: Mapped[str] = mapped_column(Text)
+
+class MailRichContent(Base):
+    __tablename__ = 'mail_rich_content'
+    submission_id: Mapped[str] = mapped_column(String, primary_key=True)
+    html: Mapped[str] = mapped_column(Text)
 
 class MailSubmission(Base):
     __tablename__ = 'mail_submissions'
@@ -293,14 +305,18 @@ def update_template(data: TemplateInput, sender: str = 'stefan'):
 def health(): return {'ok': True}
 def mailbox_preferences(db, sender):
     saved = db.get(MailboxPreferences, sender)
-    if saved: return {'display_name':saved.display_name, 'signature':saved.signature}
-    if sender == 'stefan': return {'display_name':'Stefan Radovanovic','signature':'Best,\nStefan\nCTO, Cerato Systems'}
-    if sender == 'adrija': return {'display_name':'Andrija Ilic','signature':'Best,\nAndrija\nCBO, Cerato Systems'}
-    raise HTTPException(400,'Choose Stefan or Andrija')
+    if saved: result={'display_name':saved.display_name, 'signature':saved.signature}
+    elif sender == 'stefan': result={'display_name':'Stefan Radovanovic','signature':'Best,\nStefan\nCTO, Cerato Systems'}
+    elif sender == 'adrija': result={'display_name':'Andrija Ilic','signature':'Best,\nAndrija\nCBO, Cerato Systems'}
+    else: raise HTTPException(400,'Choose Stefan or Andrija')
+    rich=db.get(MailboxRichSignature,sender)
+    result['signature_html']=rich.html if rich else rich_email.plain_to_html(result['signature'])
+    return result
 
 class MailboxPreferencesInput(BaseModel):
     display_name: str
     signature: str = ''
+    signature_html: str | None = None
 
 @app.put('/api/mail/{sender}/preferences')
 def update_mailbox_preferences(sender: str, data: MailboxPreferencesInput):
@@ -309,11 +325,20 @@ def update_mailbox_preferences(sender: str, data: MailboxPreferencesInput):
     if not name or len(name)>120 or '\n' in name or '\r' in name or any(ord(c)<32 for c in name):
         raise HTTPException(400,'Enter a valid single-line sender name.')
     if len(data.signature)>10000: raise HTTPException(400,'Signature is too long.')
+    try: signature_html=rich_email.clean_fragment(data.signature_html) if data.signature_html is not None else None
+    except ValueError as exc: raise HTTPException(400,str(exc))
+    signature=rich_email.plain_text(signature_html) if signature_html is not None else data.signature
+    if len(signature)>10000: raise HTTPException(400,'Signature is too long.')
     with Session.begin() as db:
         saved=db.get(MailboxPreferences,sender)
-        if not saved: db.add(MailboxPreferences(sender=sender,display_name=name,signature=data.signature))
-        else: saved.display_name=name; saved.signature=data.signature
-    return {'display_name':name,'signature':data.signature}
+        if not saved: db.add(MailboxPreferences(sender=sender,display_name=name,signature=signature))
+        else: saved.display_name=name; saved.signature=signature
+        rich=db.get(MailboxRichSignature,sender)
+        if signature_html is not None:
+            if rich: rich.html=signature_html
+            else: db.add(MailboxRichSignature(sender=sender,html=signature_html))
+        elif rich: db.delete(rich)
+    return {'display_name':name,'signature':signature,'signature_html':signature_html if signature_html is not None else rich_email.plain_to_html(signature)}
 
 @app.get('/api/settings')
 def settings():
@@ -542,6 +567,7 @@ class ComposeMailInput(BaseModel):
     recipient: str
     subject: str
     body: str
+    html_body: str | None = None
     in_reply_to: str = ''
     references: str = ''
 
@@ -592,24 +618,38 @@ def mailbox_message(sender: str, uid: str, folder: str = 'inbox', uidvalidity: s
 def send_manual_mail(sender: str, data: ComposeMailInput):
     address,password = mailbox(sender)
     recipient = data.recipient.strip()
-    if not valid_address(recipient) or not data.subject.strip() or not data.body.strip() or len(data.subject)>300 or len(data.body)>100000:
+    if not valid_address(recipient) or not data.subject.strip() or len(data.subject)>300 or len(data.body)>100000:
         raise HTTPException(400,'Provide one valid recipient, a subject and a message.')
     if any('\n' in value or '\r' in value for value in (data.subject,data.in_reply_to,data.references)):
         raise HTTPException(400,'Invalid message header.')
-    with Session.begin() as db:
-        existing=db.get(MailSubmission,str(data.request_id))
-        if existing:
-            if existing.sender!=sender or existing.recipient!=recipient or existing.subject!=data.subject or existing.body!=data.body: raise HTTPException(409,'This request ID was already used for a different message.')
-            return {'status':existing.status,'message_id':existing.message_id,'warning':existing.error}
-        if db.get(Suppression,recipient.lower()): raise HTTPException(409,'This address is marked do not contact.')
-        item=MailSubmission(id=str(data.request_id),sender=sender,recipient=recipient,subject=data.subject,body=data.body,status='sending',message_id=make_msgid())
-        db.add(item); db.flush(); message_id=item.message_id
+    try: html_body=rich_email.clean_fragment(data.html_body) if data.html_body is not None else None
+    except ValueError as exc: raise HTTPException(400,str(exc))
+    if not data.body.strip() and (not html_body or '<img' not in html_body): raise HTTPException(400,'Provide a message.')
+    # Include an image as a related MIME part, not an external tracking URL.
     with Session() as db: display_name = mailbox_preferences(db,sender)['display_name']
-    msg=EmailMessage(); msg['From']=formataddr((display_name,address)); msg['To']=recipient; msg['Subject']=data.subject; msg['Message-ID']=message_id; msg['Date']=formatdate(localtime=False)
+    candidate_id=make_msgid()
+    msg=EmailMessage(); msg['From']=formataddr((display_name,address)); msg['To']=recipient; msg['Subject']=data.subject; msg['Message-ID']=candidate_id; msg['Date']=formatdate(localtime=False)
     if data.in_reply_to:
         msg['In-Reply-To']=data.in_reply_to
         msg['References']=(data.references+' '+data.in_reply_to).strip()
-    msg.set_content(data.body)
+    msg.set_content((rich_email.plain_text(html_body) if html_body is not None else data.body) or '[Image]')
+    if html_body is not None:
+        rendered,images=rich_email.mime_html(html_body)
+        msg.add_alternative(rendered,subtype='html')
+        for cid,kind,content in images: msg.get_payload()[-1].add_related(content,maintype='image',subtype=kind,cid=cid,disposition='inline')
+    if os.getenv('MAIL_TRANSPORT','smtp').lower()=='relay' and len(base64.b64encode(msg.as_bytes(policy=SMTP)))>200000:
+        raise HTTPException(400,'Email is too large for the sending relay. Use smaller images or shorten the message.')
+    with Session.begin() as db:
+        existing=db.get(MailSubmission,str(data.request_id))
+        if existing:
+            stored_html=db.get(MailRichContent,str(data.request_id))
+            if existing.sender!=sender or existing.recipient!=recipient or existing.subject!=data.subject or existing.body!=data.body or (stored_html.html if stored_html else None)!=html_body: raise HTTPException(409,'This request ID was already used for a different message.')
+            return {'status':existing.status,'message_id':existing.message_id,'warning':existing.error}
+        if db.get(Suppression,recipient.lower()): raise HTTPException(409,'This address is marked do not contact.')
+        item=MailSubmission(id=str(data.request_id),sender=sender,recipient=recipient,subject=data.subject,body=data.body,status='sending',message_id=candidate_id)
+        db.add(item)
+        if html_body is not None: db.add(MailRichContent(submission_id=str(data.request_id),html=html_body))
+        db.flush(); message_id=item.message_id
     # A failure before submission is definitely not sent. Once submission begins,
     # network failures can be ambiguous and must never trigger an automatic retry.
     def record_failure(status, message):
