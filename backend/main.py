@@ -37,7 +37,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from openpyxl import load_workbook
 from pydantic import BaseModel
 from PIL import Image, ImageDraw, ImageOps, UnidentifiedImageError
-from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text, create_engine, delete, func, or_, select
+from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text, create_engine, delete, func, or_, select, text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, sessionmaker
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -53,6 +53,7 @@ class Lead(Base):
     city: Mapped[str | None]; category: Mapped[str | None]; service_types: Mapped[str | None]
     website: Mapped[str | None]; employees: Mapped[str | None]; linkedin: Mapped[str | None]
     contact_name: Mapped[str | None]; person_email: Mapped[str | None]; company_email: Mapped[str | None]
+    email_type: Mapped[str] = mapped_column(String(16), default='unknown', server_default='unknown')
     status: Mapped[str] = mapped_column(String, default='new', index=True)
     notes: Mapped[str | None] = mapped_column(Text); research: Mapped[str | None] = mapped_column(Text)
     research_sources: Mapped[str | None] = mapped_column(Text)
@@ -154,6 +155,8 @@ I’d love to record a short video for {{company_name}} showing 3 places where t
 
 Want me to record the walkthrough?"""
 Base.metadata.create_all(engine)
+with engine.begin() as connection:
+    connection.execute(text("ALTER TABLE leads ADD COLUMN IF NOT EXISTS email_type VARCHAR(16) NOT NULL DEFAULT 'unknown'"))
 app = FastAPI(title='Cerato CRM')
 app.add_middleware(CORSMiddleware, allow_origins=['http://localhost:5173','http://127.0.0.1:5173'], allow_methods=['*'], allow_headers=['*'])
 
@@ -244,12 +247,24 @@ def mailbox(key):
     if not password: raise HTTPException(400, f'{key.title()} mailbox is not connected.')
     return address, password
 def valid_address(value): return bool(re.fullmatch(r'[^\s@,;]+@[^\s@,;]+\.[^\s@,;]+', value or ''))
+GENERIC_EMAIL_LOCALS = {'info','contact','office','sales','support','service','admin','administration','booking','planning','dispatch','operations','logistics','transport','export','import','reception','customer','customers','enquiries','enquiry','inquiries','inquiry','hello','mail','team','marketing','publicrelations','pr','accounting'}
+def infer_email_type(lead):
+    address = lead.get('person_email') or lead.get('company_email')
+    if not address or '@' not in address: return 'unknown'
+    local = re.sub(r'[^a-z0-9]', '', address.split('@', 1)[0].lower())
+    if local in GENERIC_EMAIL_LOCALS: return 'general'
+    if lead.get('person_email'):
+        company = re.sub(r'[^a-z0-9]', '', (lead.get('company') or '').lower())
+        if len(company) >= 5 and local.startswith(company[:7]): return 'unknown'
+        return 'personal'
+    return 'unknown'
 def get_lead(db, id):
     obj = db.get(Lead,id)
     if not obj: raise HTTPException(404, 'Lead not found')
     return obj
 class LeadUpdate(BaseModel):
     status: str | None = None
+    email_type: str | None = None
     notes: str | None = None
     research: str | None = None
     research_sources: str | None = None
@@ -438,15 +453,19 @@ def import_leads():
             if not row[0]: continue
             vals = [str(x).strip() if x is not None else None for x in row[:10]]
             if vals[0] in existing: skipped += 1; continue
-            db.add(Lead(**dict(zip(['company','city','category','service_types','website','employees','linkedin','contact_name','person_email','company_email'],vals))))
+            lead_data = dict(zip(['company','city','category','service_types','website','employees','linkedin','contact_name','person_email','company_email'],vals))
+            db.add(Lead(**lead_data, email_type=infer_email_type(lead_data)))
             existing.add(vals[0]); added += 1
     return {'added':added,'skipped':skipped}
 @app.get('/api/leads')
-def leads(q: str = '', status: str = ''):
+def leads(q: str = '', status: str = '', email_type: str = ''):
     with Session() as db:
         query = select(Lead)
         if q: query = query.where(or_(Lead.company.ilike('%'+q+'%'), Lead.city.ilike('%'+q+'%'), Lead.person_email.ilike('%'+q+'%'), Lead.company_email.ilike('%'+q+'%')))
         if status: query = query.where(Lead.status == status)
+        if email_type:
+            if email_type not in ('personal','general','unknown'): raise HTTPException(400, 'Invalid email type')
+            query = query.where(Lead.email_type == email_type)
         owners = {}
         for lead_id, sender in db.execute(select(Message.lead_id, Message.sender).where(Message.direction == 'outbound').order_by(Message.created_at, Message.id)):
             owners.setdefault(lead_id, sender)
@@ -470,6 +489,7 @@ def update_lead(id: int, data: LeadUpdate):
         obj=get_lead(db,id)
         changes=data.model_dump(exclude_unset=True)
         if 'status' in changes and changes['status'] not in ('new','review','simulated','sent','replied','do_not_contact'): raise HTTPException(400,'Invalid status')
+        if 'email_type' in changes and changes['email_type'] not in ('personal','general','unknown'): raise HTTPException(400,'Invalid email type')
         if obj.status == 'do_not_contact' and changes.get('status', 'do_not_contact') != 'do_not_contact': raise HTTPException(409, 'A stopped lead cannot be reactivated here')
         for k,v in changes.items(): setattr(obj,k,v)
         if obj.status == 'do_not_contact':
