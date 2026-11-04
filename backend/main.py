@@ -442,12 +442,11 @@ def import_leads():
             existing.add(vals[0]); added += 1
     return {'added':added,'skipped':skipped}
 @app.get('/api/leads')
-def leads(q: str = '', status: str = '', groupage: bool = False):
+def leads(q: str = '', status: str = ''):
     with Session() as db:
         query = select(Lead)
         if q: query = query.where(or_(Lead.company.ilike('%'+q+'%'), Lead.city.ilike('%'+q+'%'), Lead.person_email.ilike('%'+q+'%'), Lead.company_email.ilike('%'+q+'%')))
         if status: query = query.where(Lead.status == status)
-        if groupage: query = query.where(Lead.category.ilike('%Groupage by road%'))
         owners = {}
         for lead_id, sender in db.execute(select(Message.lead_id, Message.sender).where(Message.direction == 'outbound').order_by(Message.created_at, Message.id)):
             owners.setdefault(lead_id, sender)

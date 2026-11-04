@@ -30,7 +30,6 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest='command', required=True)
     ls = commands.add_parser('leads', help='List eligible new leads')
-    ls.add_argument('--all-services', action='store_true', help='Include leads without groupage category')
     ls.add_argument('--limit', type=int, default=20)
     show = commands.add_parser('show', help='Show a lead and its message history')
     show.add_argument('lead_id', type=int)
@@ -55,7 +54,7 @@ def main():
     args=parser.parse_args()
     if args.command == 'leads':
         if args.limit < 1: parser.error('--limit must be positive')
-        result=request('/leads?status=new'+('' if args.all_services else '&groupage=true'))[:args.limit]
+        result=request('/leads?status=new')[:args.limit]
     elif args.command == 'show': result=request(f'/leads/{args.lead_id}')
     elif args.command == 'research':
         findings, sources = read(args.findings), read(args.sources)
