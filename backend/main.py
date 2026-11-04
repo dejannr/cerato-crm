@@ -486,7 +486,7 @@ def update_lead(id: int, data: LeadUpdate):
     with Session.begin() as db:
         obj=get_lead(db,id)
         changes=data.model_dump(exclude_unset=True)
-        if 'status' in changes and changes['status'] not in ('new','review','simulated','sent','replied','do_not_contact'): raise HTTPException(400,'Invalid status')
+        if 'status' in changes and changes['status'] not in ('new','review','sent','replied','do_not_contact'): raise HTTPException(400,'Invalid status')
         if 'email_type' in changes and changes['email_type'] not in ('personal','general','unknown'): raise HTTPException(400,'Invalid email type')
         if obj.status == 'do_not_contact' and changes.get('status', 'do_not_contact') != 'do_not_contact': raise HTTPException(409, 'A stopped lead cannot be reactivated here')
         for k,v in changes.items(): setattr(obj,k,v)
@@ -538,33 +538,7 @@ def delete_draft(id:int):
     return {'ok':True,'lead_status':status}
 @app.post('/api/drafts/{id}/send')
 def send(id: int):
-    raise HTTPException(403, 'Real email sending is disabled while simulation mode is active')
-
-@app.post('/api/drafts/{id}/simulate')
-def simulate(id: int):
-    with Session.begin() as db:
-        obj = db.scalar(select(Message).where(Message.id == id).with_for_update())
-        if not obj or obj.status != 'draft': raise HTTPException(409, 'Message is not an available draft')
-        if re.search(r'{{\s*[^{}]+\s*}}', obj.subject + obj.body): raise HTTPException(400, 'Replace all template placeholders before recording a simulation')
-        lead = db.scalar(select(Lead).where(Lead.id == obj.lead_id).with_for_update())
-        if lead.status in ('replied', 'do_not_contact'): raise HTTPException(409, 'Lead has replied or is stopped')
-        if db.get(Suppression, obj.recipient.lower()): raise HTTPException(409, 'Recipient is suppressed')
-        if db.scalar(select(Message.id).where(Message.lead_id == lead.id, Message.id != obj.id, Message.direction == 'outbound', Message.status.in_(['simulated', 'sent', 'sending', 'uncertain'])).limit(1)): raise HTTPException(409, 'An outreach message is already recorded for this lead')
-        obj.status = 'simulated'
-        lead.status = 'simulated'
-        return {'ok': True, 'message': serialize(obj)}
-class SimulationRevision(BaseModel):
-    body: str
-
-@app.patch('/api/simulations/{id}')
-def revise_simulation(id: int, data: SimulationRevision):
-    if not data.body.strip() or re.search(r'{{\s*[^{}]+\s*}}', data.body):
-        raise HTTPException(400, 'Provide a complete message without placeholders')
-    with Session.begin() as db:
-        obj = db.scalar(select(Message).where(Message.id == id).with_for_update())
-        if not obj or obj.status != 'simulated': raise HTTPException(404, 'Simulation not found')
-        obj.body = data.body
-        return serialize(obj)
+    raise HTTPException(403, 'Lead drafts cannot be sent here. Use Inbox to compose and confirm a real email.')
 
 # Jobs deliberately stay in memory: a service restart interrupts them instead of resending.
 JOBS = {}

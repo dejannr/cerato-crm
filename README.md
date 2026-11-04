@@ -1,6 +1,6 @@
 # Cerato CRM
 
-A local outreach CRM: React, FastAPI, and PostgreSQL. Sending is currently disabled for simulation. The local app has no authentication and must bind to localhost only; production uses a shared login.
+A local outreach CRM: React, FastAPI, and PostgreSQL. Lead outreach creates drafts only; real messages are manually composed and confirmed in Inbox. The local app has no authentication and must bind to localhost only; production uses a shared login.
 
 ## Setup
 
@@ -22,11 +22,11 @@ Start the API and interface together with `./start.sh`, then press Ctrl+C to sto
 npm --prefix frontend run dev
 ```
 
-Open http://127.0.0.1:5173 and click **Import spreadsheet**. Inbox synchronization is paused during simulation mode. Importing again skips existing company names.
+Open http://127.0.0.1:5173 and click **Import spreadsheet**. Open Inbox to synchronize the connected mailbox. Importing again skips existing company names.
 
 ## Workflow and limits
 
-Ask Codex to use the instructions in `AGENTS.md` to research new leads and save drafts. Review each draft in the UI, then record a simulated send. Real sending is disabled. A successful SMTP response means the server accepted the message, not that it reached the inbox. Failed or interrupted sends may have uncertain outcomes and are never automatically retried; check the mailbox before proceeding. SMTP messages are stored in the CRM; whether they appear in Purelymail's Sent folder depends on provider behavior and is not guaranteed.
+Ask Codex to use the instructions in `AGENTS.md` to research new leads and save drafts. Review and edit drafts in each lead’s conversation. Lead drafts are not sent or marked as simulated. To send a real message, compose and confirm it in Inbox. A successful SMTP response means the server accepted the message, not that it reached the inbox. Failed or interrupted sends may have uncertain outcomes and are never automatically retried; check the mailbox before proceeding. SMTP messages are stored in the CRM; whether they appear in Purelymail's Sent folder depends on provider behavior and is not guaranteed.
 
 Reply matching uses message thread headers and requires the sender to match the original recipient. Replies without matching headers, replies from a different address, bounces, and opt-outs cannot be reliably identified automatically. Review the mailboxes manually for these cases, and mark opt-outs **do not contact** in the CRM. No automatic follow-ups are sent. Website URLs, email addresses and contact names from the spreadsheet have not been verified. Avoid contacting the same company group twice by reviewing duplicates.
 
@@ -45,15 +45,15 @@ python3 tools/outreach.py template
 python3 tools/outreach.py review
 ```
 
-These commands require the local API to be running. The helper does not send email. Edit the template in the app and verify the recipient before drafting. The interface supports editing and recording a simulation for each draft.
+These commands require the local API to be running. The helper does not send email. Edit the template in the app and review lead details before drafting. The interface supports editing and deleting drafts.
 
-## Simulation mode
+## Lead outreach
 
-Outreach campaign sending is currently disabled in the API. The separate Inbox supports manually composing and confirming real email. Codex can research leads and create real drafts, and each lead’s conversation can record a simulated send without connecting a mailbox. A simulated message remains in the lead's conversation history and the lead is marked `simulated`; it is not delivered. This simulation does not generate replies or delivery events. Re-enabling real sending would require an intentional implementation change and separate testing.
+Codex creates drafts only. It does not send messages or record simulated sends. Existing simulated messages remain as historical records. Real email is sent only through the separately confirmed Inbox composer.
 
 ## Sender profiles
 
-Choose Stefan or Andrija when opening the app; use **Switch** in the header to change profiles. The selection lasts for the browser tab's session. Each sender has a separately editable template. Each sender can edit their name and title in their template; defaults are Stefan / CTO and Andrija / CBO. The {{sender_name}} and {{sender_role}} placeholders fill those values in new messages. A lead's owner is the sender of its first outbound draft or message, visible in the lead list and detail view. Deleting an only draft releases the assignment. Existing simulated messages keep their recorded sender. Browser profile selection is not authentication and is not visible to Codex; specify the sender when requesting drafts. The internal API and mailbox settings use `adrija` for Andrija.
+Choose Stefan or Andrija when opening the app; use **Switch** in the header to change profiles. The selection lasts for the browser tab's session. Each sender has a separately editable template. Each sender can edit their name and title in their template; defaults are Stefan / CTO and Andrija / CBO. The {{sender_name}} and {{sender_role}} placeholders fill those values in new messages. A lead's owner is the sender of its first outbound draft or message, visible in the lead list and detail view. Deleting an only draft releases the assignment. Historical messages keep their recorded sender. Browser profile selection is not authentication and is not visible to Codex; specify the sender when requesting drafts. The internal API and mailbox settings use `adrija` for Andrija.
 
 ## Production
 
@@ -73,7 +73,7 @@ Select Stefan or Andrija, open **Inbox**, then use **Connect mailbox** and enter
 
 In Inbox → Email settings, edit each mailbox’s sender display name and signature. New messages and replies can include that signature, with a per-message option to turn it off. The display name is separate from the outreach template name.
 
-The Inbox supports manually composed real messages and replies after an explicit confirmation. Accepted messages are appended to the provider's Sent folder when possible. If the send result is uncertain, check Purelymail before trying again. Outreach lead drafts and simulations remain separate and cannot be sent through the outreach workflow. Inbox messages are not yet automatically linked to leads.
+The Inbox supports manually composed real messages and replies after an explicit confirmation. Accepted messages are appended to the provider's Sent folder when possible. If the send result is uncertain, check Purelymail before trying again. Outreach lead drafts remain separate and cannot be sent through the outreach workflow. Inbox messages are not yet automatically linked to leads.
 
 Credentials are encrypted with `MAILBOX_ENCRYPTION_KEY`, a Fernet key kept outside the database in `.env` locally and `/etc/cerato-crm.env` on the droplet. Keep this key private and back it up securely: losing or changing it requires reconnecting the mailboxes. Generate a key with `.venv/bin/python -c 'from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())'`. The existing CRM login is shared; anyone with access can open either mailbox.
 
