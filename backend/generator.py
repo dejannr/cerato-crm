@@ -7,7 +7,8 @@ import tempfile
 from pathlib import Path
 from datetime import date
 
-MODEL = 'gpt-6.1-terra'
+MODEL = 'gpt-6-luna'
+REASONING_EFFORT = 'high'
 RESEARCH_SKILL = Path(__file__).resolve().parent.parent / '.agents/skills/cerato-opening-lines/SKILL.md'
 CRITERIA = ('specificity','evidence','recency','relevance','style')
 CRITERION_SCHEMA = {'type':'object','additionalProperties':False,'properties':{'score':{'type':'integer'},'reason':{'type':'string'}},'required':['score','reason']}
@@ -46,7 +47,7 @@ Assess the opening you actually wrote. Give each of specificity, evidence, recen
         schema.write_text(json.dumps(SCHEMA), encoding='utf-8')
         # Restrict inherited environment; never pass database or CRM secrets to the agent.
         env = {k: os.environ[k] for k in ('HOME','USER','LOGNAME','PATH','CODEX_HOME','SSL_CERT_FILE','SSL_CERT_DIR','LANG','TMPDIR') if k in os.environ}
-        args=[codex, '--disable','shell_tool','--disable','unified_exec','--search','-a','never','exec','--ignore-user-config','--skip-git-repo-check','--ephemeral','-s','read-only','-m',MODEL,'--output-schema',str(schema),'-o',str(output),'-']
+        args=[codex, '--disable','shell_tool','--disable','unified_exec','--search','-a','never','exec','--ignore-user-config','--skip-git-repo-check','--ephemeral','-s','read-only','-m',MODEL,'-c',f'model_reasoning_effort="{REASONING_EFFORT}"','--output-schema',str(schema),'-o',str(output),'-']
         try:
             proc=subprocess.run(args,input=prompt,text=True,capture_output=True,cwd=temp,env=env,timeout=300)
         except subprocess.TimeoutExpired: raise RuntimeError('Research timed out. Please try again.')
