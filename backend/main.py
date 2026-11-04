@@ -37,7 +37,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from openpyxl import load_workbook
 from pydantic import BaseModel
 from PIL import Image, ImageDraw, ImageOps, UnidentifiedImageError
-from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text, create_engine, delete, func, or_, select, text
+from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text, create_engine, delete, func, or_, select
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, sessionmaker
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -155,8 +155,6 @@ I’d love to record a short video for {{company_name}} showing 3 places where t
 
 Want me to record the walkthrough?"""
 Base.metadata.create_all(engine)
-with engine.begin() as connection:
-    connection.execute(text("ALTER TABLE leads ADD COLUMN IF NOT EXISTS email_type VARCHAR(16) NOT NULL DEFAULT 'unknown'"))
 app = FastAPI(title='Cerato CRM')
 app.add_middleware(CORSMiddleware, allow_origins=['http://localhost:5173','http://127.0.0.1:5173'], allow_methods=['*'], allow_headers=['*'])
 
