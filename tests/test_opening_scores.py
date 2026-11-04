@@ -34,6 +34,16 @@ class OpeningScoreTests(unittest.TestCase):
             lead_id=self.create_lead();result=self.result(['https://example.com/booking']);result['personalized_sentence']=opening
             with patch.object(app,'generate',return_value=result): app.run_generation(lead_id,'stefan',{},self.template())
             self.assertIn(opening,app.lead(lead_id)['messages'][0]['body'])
+    def test_agent_subject_takes_precedence_over_legacy_template_subject(self):
+        lead_id=self.create_lead(); template=self.template(); template['subject']='Old template subject'
+        with patch.object(app,'generate',return_value=self.result(['https://example.com/source'])): app.run_generation(lead_id,'stefan',{},template)
+        self.assertEqual(app.lead(lead_id)['messages'][0]['subject'],'A short question')
+    def test_missing_agent_subject_fails_without_creating_draft(self):
+        lead_id=self.create_lead(); result=self.result([]); result['subject']='  '
+        with patch.object(app,'generate',return_value=result): app.run_generation(lead_id,'stefan',{},self.template())
+        self.assertEqual(app.generation_status(lead_id)['state'],'failed')
+        self.assertEqual(app.lead(lead_id)['messages'],[])
+        self.assertEqual(app.lead(lead_id)['status'],'new')
     def test_generation_receives_previous_research_for_reassessment(self):
         lead_id=self.create_lead()
         with app.Session.begin() as db:

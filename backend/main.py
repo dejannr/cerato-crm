@@ -579,8 +579,8 @@ def run_generation(id: int, sender: str, lead_snapshot: dict, template: dict):
                 sentence='How do you currently coordinate transport bookings and shipment updates?'
                 for key in CRITERIA: criteria[key]={'score':0,'reason':'A generic fallback was used.'}
                 caveats=(caveats+'\n' if caveats else '')+'No personalized opening was returned; a generic question was used.'
-            subject = (template['subject'] or str(result.get('subject') or '')).strip() or 'A short logistics walkthrough'
-            if '\n' in subject or '\r' in subject or len(subject)>250: raise ValueError('The generated subject is invalid')
+            subject = str(result.get('subject') or '').strip()
+            if not subject or '\n' in subject or '\r' in subject or len(subject)>250: raise ValueError('The agent did not provide a valid subject. Please try again.')
             replacements={'{{first_name}}':first, '{{personalized_sentence}}':sentence, '{{company_name}}':obj.company, '{{sender_name}}':template['sender_name'], '{{sender_role}}':template['sender_role']}
             body=template['body']
             for key,value in replacements.items(): body=body.replace(key,value); subject=subject.replace(key,value)
