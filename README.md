@@ -1,6 +1,6 @@
 # Cerato CRM
 
-A local outreach CRM: React, FastAPI, and PostgreSQL. Lead outreach creates drafts only; real messages are manually composed and confirmed in Inbox. The local app has no authentication and must bind to localhost only; production uses a shared login.
+A local outreach CRM: React, FastAPI, and PostgreSQL. Lead drafts and mailbox messages can be reviewed and manually confirmed before sending. The local app has no authentication and must bind to localhost only; production uses a shared login.
 
 ## Setup
 
@@ -26,7 +26,7 @@ Open http://127.0.0.1:5173 and click **Import spreadsheet**. Open Inbox to synch
 
 ## Workflow and limits
 
-Ask Codex to use the instructions in `AGENTS.md` to research new leads and save drafts. Review and edit drafts in each lead’s conversation. Lead drafts are not sent or marked as simulated. To send a real message, compose and confirm it in Inbox. A successful SMTP response means the server accepted the message, not that it reached the inbox. Failed or interrupted sends may have uncertain outcomes and are never automatically retried; check the mailbox before proceeding. SMTP messages are stored in the CRM; whether they appear in Purelymail's Sent folder depends on provider behavior and is not guaranteed.
+Ask Codex to use the instructions in `AGENTS.md` to research new leads and save drafts. Review and edit drafts in each lead’s conversation. To send a real message, review a saved lead draft and confirm sending, or compose and confirm it in Inbox. A successful SMTP response means the server accepted the message, not that it reached the inbox. Failed or interrupted sends may have uncertain outcomes and are never automatically retried; check the mailbox before proceeding. SMTP messages are stored in the CRM; whether they appear in Purelymail's Sent folder depends on provider behavior and is not guaranteed.
 
 Reply matching uses message thread headers and requires the sender to match the original recipient. Replies without matching headers, replies from a different address, bounces, and opt-outs cannot be reliably identified automatically. Review the mailboxes manually for these cases, and mark opt-outs **do not contact** in the CRM. No automatic follow-ups are sent. Website URLs, email addresses and contact names from the spreadsheet have not been verified. Avoid contacting the same company group twice by reviewing duplicates.
 
@@ -49,7 +49,7 @@ These commands require the local API to be running. The helper does not send ema
 
 ## Lead outreach
 
-Codex creates drafts only. It does not send messages or record simulated sends. Existing simulated messages remain as historical records. Real email is sent only through the separately confirmed Inbox composer.
+Codex creates drafts only. It does not send messages or record simulated sends. Existing simulated messages remain as historical records. The user can manually confirm sending from a lead draft or the Inbox composer.
 
 ## Sender profiles
 
@@ -73,7 +73,7 @@ Select Stefan or Andrija, open **Inbox**, then use **Connect mailbox** and enter
 
 In Inbox → Email settings, edit each mailbox’s sender display name and signature. New messages and replies can include that signature, with a per-message option to turn it off. The display name is separate from the outreach template name.
 
-The Inbox supports manually composed real messages and replies after an explicit confirmation. Accepted messages are appended to the provider's Sent folder when possible. If the send result is uncertain, check Purelymail before trying again. Outreach lead drafts remain separate and cannot be sent through the outreach workflow. Inbox messages are not yet automatically linked to leads.
+The Inbox supports manually composed real messages and replies after an explicit confirmation. Accepted messages are appended to the provider's Sent folder when possible. If the send result is uncertain, check Purelymail before trying again. Lead drafts sent from the lead view are recorded in the conversation. Other Inbox messages are not yet automatically linked to leads.
 
 Credentials are encrypted with `MAILBOX_ENCRYPTION_KEY`, a Fernet key kept outside the database in `.env` locally and `/etc/cerato-crm.env` on the droplet. Keep this key private and back it up securely: losing or changing it requires reconnecting the mailboxes. Generate a key with `.venv/bin/python -c 'from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())'`. The existing CRM login is shared; anyone with access can open either mailbox.
 

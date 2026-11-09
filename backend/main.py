@@ -128,6 +128,12 @@ class MailSubmission(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
     error: Mapped[str | None] = mapped_column(Text)
 
+class LeadDelivery(Base):
+    __tablename__ = 'lead_deliveries'
+    message_id: Mapped[int] = mapped_column(ForeignKey('messages.id', ondelete='CASCADE'), primary_key=True)
+    request_id: Mapped[str] = mapped_column(String, unique=True)
+    include_signature: Mapped[bool] = mapped_column(Boolean, default=True)
+
 class Suppression(Base):
     __tablename__ = 'suppressions'
     email: Mapped[str] = mapped_column(String, primary_key=True)
@@ -516,8 +522,10 @@ def update_draft(id: int, data: DraftInput):
     if data.sender not in ('stefan','adrija') or not valid_address(data.recipient) or not data.subject.strip() or not data.body.strip(): raise HTTPException(400,'Provide a sender, one valid recipient, subject and body')
     with Session.begin() as db:
         obj=db.get(Message,id)
-        if not obj or obj.status != 'draft' or obj.lead_id != data.lead_id: raise HTTPException(404,'Draft not found')
-        lead = get_lead(db, obj.lead_id)
+        if not obj or obj.lead_id != data.lead_id: raise HTTPException(404,'Draft not found')
+        lead = db.scalar(select(Lead).where(Lead.id == obj.lead_id).with_for_update())
+        obj = db.scalar(select(Message).where(Message.id == id).with_for_update().execution_options(populate_existing=True))
+        if not obj or obj.status != 'draft': raise HTTPException(404,'Draft not found')
         if data.sender != obj.sender: raise HTTPException(409, 'This draft belongs to a different sender')
         if lead.status in ('do_not_contact','replied') or db.get(Suppression,data.recipient.lower()): raise HTTPException(409,'Lead or recipient is stopped')
         for k,v in data.model_dump().items(): setattr(obj,k,v)
@@ -528,7 +536,7 @@ def delete_draft(id:int):
         obj=db.get(Message,id)
         if not obj or obj.status != 'draft' or obj.direction != 'outbound': raise HTTPException(404,'Draft not found')
         lead=db.scalar(select(Lead).where(Lead.id==obj.lead_id).with_for_update())
-        obj=db.scalar(select(Message).where(Message.id==id).with_for_update())
+        obj=db.scalar(select(Message).where(Message.id==id).with_for_update().execution_options(populate_existing=True))
         if not obj or obj.status != 'draft' or obj.direction != 'outbound': raise HTTPException(404,'Draft not found')
         db.delete(obj); db.flush()
         if lead.status=='review' and not db.scalar(select(Message.id).where(Message.lead_id==lead.id).limit(1)): lead.status='new'
@@ -536,9 +544,51 @@ def delete_draft(id:int):
     with JOB_LOCK:
         if JOBS.get(lead_id,{}).get('state') != 'running': JOBS.pop(lead_id,None)
     return {'ok':True,'lead_status':status}
+class SendLeadDraftInput(BaseModel):
+    include_signature: bool = True
+    recipient: str
+    subject: str
+    body: str
+
 @app.post('/api/drafts/{id}/send')
-def send(id: int):
-    raise HTTPException(403, 'Lead drafts cannot be sent here. Use Inbox to compose and confirm a real email.')
+def send_lead_draft(id: int, data: SendLeadDraftInput):
+    request_id = uuid.uuid4()
+    with Session.begin() as db:
+        draft = db.get(Message, id)
+        if not draft: raise HTTPException(404, 'Draft not found')
+        lead = db.scalar(select(Lead).where(Lead.id == draft.lead_id).with_for_update())
+        draft = db.scalar(select(Message).where(Message.id == id).with_for_update().execution_options(populate_existing=True))
+        if not draft or draft.direction != 'outbound' or draft.status != 'draft': raise HTTPException(409, 'This draft is no longer available to send. Check its current status.')
+        if (draft.recipient, draft.subject, draft.body) != (data.recipient, data.subject, data.body): raise HTTPException(409, 'This draft changed. Review the latest version before sending.')
+        if lead.status in ('sent', 'replied', 'do_not_contact'): raise HTTPException(409, 'This lead has already been contacted, replied, or is marked do not contact.')
+        if not valid_address(draft.recipient) or not draft.subject.strip() or not draft.body.strip(): raise HTTPException(400, 'Provide a valid recipient, subject and message.')
+        if re.search(r'{{\s*[^{}]+\s*}}', draft.subject + draft.body): raise HTTPException(400, 'Replace all template placeholders before sending.')
+        if db.get(Suppression, draft.recipient.lower()): raise HTTPException(409, 'This recipient is marked do not contact.')
+        if db.scalar(select(Message.id).where(Message.lead_id == lead.id, Message.id != id, Message.direction == 'outbound', Message.status.in_(['simulated','sent','sending','uncertain'])).limit(1)): raise HTTPException(409, 'Another outreach message is already recorded for this lead.')
+        delivery = db.get(LeadDelivery, id)
+        if delivery:
+            delivery.request_id = str(request_id); delivery.include_signature = data.include_signature
+        else:
+            db.add(LeadDelivery(message_id=id, request_id=str(request_id), include_signature=data.include_signature))
+        lead_id, sender, recipient, subject, body = lead.id, draft.sender, draft.recipient, draft.subject, draft.body
+        draft.status = 'sending'; draft.error = None
+    try:
+        result = send_manual_mail(sender, ComposeMailInput(request_id=request_id, recipient=recipient, subject=subject, body=body, include_signature=data.include_signature))
+    except HTTPException as exc:
+        result = {'status':'failed', 'warning':str(exc.detail)}
+    except Exception:
+        result = {'status':'uncertain', 'warning':'The sending outcome is uncertain. Check your mailbox before trying again.'}
+    status = result.get('status')
+    if status not in ('sent','failed','uncertain'): status = 'uncertain'
+    with Session.begin() as db:
+        lead = db.scalar(select(Lead).where(Lead.id == lead_id).with_for_update())
+        draft = db.scalar(select(Message).where(Message.id == id).with_for_update().execution_options(populate_existing=True))
+        draft.status = 'draft' if status == 'failed' else status
+        draft.error = result.get('warning')
+        if status == 'sent':
+            draft.message_id = result.get('message_id'); draft.sent_at = now()
+            if lead.status not in ('replied','do_not_contact'): lead.status = 'sent'
+    return {'status':status, 'warning':result.get('warning')}
 
 # Jobs deliberately stay in memory: a service restart interrupts them instead of resending.
 JOBS = {}
