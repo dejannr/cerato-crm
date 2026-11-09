@@ -755,6 +755,57 @@ class ComposeMailInput(BaseModel):
     in_reply_to: str = ''
     references: str = ''
 
+class LeadReplyInput(BaseModel):
+    request_id: uuid.UUID
+    body: str
+    html_body: str | None = None
+    include_signature: bool = True
+
+def lead_reply_context(db, lead_id, message_id):
+    lead=get_lead(db,lead_id)
+    if lead.status=='do_not_contact': raise HTTPException(409,'This lead is marked do not contact.')
+    messages=db.scalars(select(Message).where(Message.lead_id==lead_id)).all()
+    target=next((m for m in messages if m.id==message_id and m.direction=='inbound' and m.status=='received'),None)
+    if not target or not target.message_id or not mail_client.message_ids(target.message_id): raise HTTPException(404,'This reply is not available for a threaded response.')
+    if target.sender not in ('stefan','adrija'): raise HTTPException(400,'This message has no connected sender account.')
+    by_id={m.message_id:m for m in messages if m.message_id and m.sender==target.sender}
+    ancestor=target; visited=set(); chain=[]; recipient=None
+    while ancestor and ancestor.message_id not in visited and len(chain)<30:
+        visited.add(ancestor.message_id);chain.append(ancestor.message_id)
+        if ancestor.direction=='outbound' and ancestor.status=='sent':recipient=ancestor.recipient;break
+        refs=mail_client.message_ids(ancestor.in_reply_to or '')
+        ancestor=next((by_id[ref] for ref in refs if ref in by_id),None)
+    if not recipient:
+        candidates={m.recipient.lower() for m in messages if m.sender==target.sender and m.direction=='outbound' and m.status=='sent' and m.recipient}
+        if len(candidates)!=1:raise HTTPException(409,'The original recipient could not be determined. Reply from Inbox instead.')
+        recipient=next(iter(candidates))
+    if not valid_address(recipient) or db.get(Suppression,recipient.lower()):raise HTTPException(409,'This recipient is marked do not contact or has an invalid address.')
+    subject=target.subject or '(No subject)'
+    if not re.match(r'^\s*re\s*:',subject,re.I):subject='Re: '+subject
+    return {'sender':target.sender,'recipient':recipient,'subject':subject,'in_reply_to':target.message_id,'references':' '.join(reversed(chain[1:]))}
+
+@app.get('/api/leads/{lead_id}/messages/{message_id}/reply')
+def prepare_lead_reply(lead_id:int,message_id:int):
+    with Session() as db:return lead_reply_context(db,lead_id,message_id)
+
+@app.post('/api/leads/{lead_id}/messages/{message_id}/reply')
+def send_lead_reply(lead_id:int,message_id:int,data:LeadReplyInput):
+    with Session() as db:context=lead_reply_context(db,lead_id,message_id)
+    try:
+        result=send_manual_mail(context['sender'],ComposeMailInput(request_id=data.request_id,recipient=context['recipient'],subject=context['subject'],body=data.body,html_body=data.html_body,include_signature=data.include_signature,in_reply_to=context['in_reply_to'],references=context['references']))
+    except HTTPException:raise
+    except Exception:return {'status':'uncertain','warning':'The sending outcome is uncertain. Check your mailbox before trying again.'}
+    if result.get('status')=='sent':
+        try:
+            with Session.begin() as db:
+                db.scalar(select(Lead).where(Lead.id==lead_id).with_for_update())
+                if not db.scalar(select(Message.id).where(Message.message_id==result['message_id'])):
+                    db.add(Message(lead_id=lead_id,direction='outbound',status='sent',sender=context['sender'],recipient=context['recipient'],subject=context['subject'],body=data.body,message_id=result['message_id'],in_reply_to=context['in_reply_to'],sent_at=now()))
+        except Exception:
+            logging.getLogger(__name__).exception('Could not immediately record a lead reply')
+            result['warning']=result.get('warning') or 'Email sent. Conversation history will update when the mailbox syncs.'
+    return result
+
 
 def mail_connection(sender):
     address,password = mailbox(sender)
