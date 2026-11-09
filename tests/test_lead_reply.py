@@ -1,6 +1,7 @@
 import email
 import unittest
 import uuid
+from datetime import timedelta
 from unittest.mock import patch
 from fastapi import HTTPException
 from backend import main as app
@@ -25,17 +26,28 @@ class LeadReplyTests(unittest.TestCase):
         mime=email.message_from_bytes(relay.call_args.args[-1],policy=email.policy.default)
         self.assertEqual(mime['In-Reply-To'],self.incoming);self.assertIn(self.original,mime['References']);self.assertEqual(mime['To'],self.address)
         self.assertIn('Cerato Systems',mime.get_body(preferencelist=('plain',)).get_content())
-        lead=app.lead(self.lead_id);self.assertEqual(lead['status'],'replied');self.assertEqual(len(lead['messages']),3)
+        lead=app.lead(self.lead_id);self.assertEqual(lead['status'],'sent');self.assertEqual(len(lead['messages']),3)
 
     def test_stopped_and_suppressed_leads_cannot_send(self):
         with app.Session.begin() as db:db.get(app.Lead,self.lead_id).status='do_not_contact'
         with patch.object(app,'send_manual_mail') as send:
             with self.assertRaises(HTTPException):app.send_lead_reply(self.lead_id,self.reply_id,self.data)
             send.assert_not_called()
+
         with app.Session.begin() as db:db.get(app.Lead,self.lead_id).status='replied';db.add(app.Suppression(email=self.address,reason='Stop'))
         with patch.object(app,'send_manual_mail') as send:
             with self.assertRaises(HTTPException):app.send_lead_reply(self.lead_id,self.reply_id,self.data)
             send.assert_not_called()
+
+    def test_repeated_request_does_not_hide_a_newer_reply(self):
+        with patch.object(app,'mailbox',return_value=('stefan@ceratosystems.com','fake')),patch.dict(app.os.environ,{'MAIL_TRANSPORT':'relay','RELAY_URL':'https://example.com/send','RELAY_TOKEN':'fake'}),patch.object(app.mail_relay,'send',return_value=('sent',None)),patch.object(app,'mail_connection',side_effect=RuntimeError('No IMAP')):
+            app.send_lead_reply(self.lead_id,self.reply_id,self.data)
+            with app.Session.begin() as db:
+                db.get(app.Lead,self.lead_id).status='replied'
+                submission=db.get(app.MailSubmission,str(self.data.request_id))
+                db.add(app.Message(lead_id=self.lead_id,direction='inbound',status='received',sender='stefan',recipient='stefan@ceratosystems.com',subject='Re: Hello',body='Another reply',message_id='<new-'+uuid.uuid4().hex+'@example.com>',created_at=submission.created_at+timedelta(seconds=1)))
+            app.send_lead_reply(self.lead_id,self.reply_id,self.data)
+        self.assertEqual(app.lead(self.lead_id)['status'],'replied')
 
     def test_unmatched_recipient_requires_inbox_when_ambiguous(self):
         with app.Session.begin() as db:

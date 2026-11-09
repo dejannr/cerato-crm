@@ -798,9 +798,12 @@ def send_lead_reply(lead_id:int,message_id:int,data:LeadReplyInput):
     if result.get('status')=='sent':
         try:
             with Session.begin() as db:
-                db.scalar(select(Lead).where(Lead.id==lead_id).with_for_update())
+                lead=db.scalar(select(Lead).where(Lead.id==lead_id).with_for_update())
                 if not db.scalar(select(Message.id).where(Message.message_id==result['message_id'])):
                     db.add(Message(lead_id=lead_id,direction='outbound',status='sent',sender=context['sender'],recipient=context['recipient'],subject=context['subject'],body=data.body,message_id=result['message_id'],in_reply_to=context['in_reply_to'],sent_at=now()))
+                submission=db.get(MailSubmission,str(data.request_id))
+                later_reply=submission and db.scalar(select(Message.id).where(Message.lead_id==lead_id,Message.direction=='inbound',Message.status=='received',Message.created_at>submission.created_at).limit(1))
+                if lead.status=='replied' and not later_reply and not db.get(Suppression,context['recipient'].lower()):lead.status='sent'
         except Exception:
             logging.getLogger(__name__).exception('Could not immediately record a lead reply')
             result['warning']=result.get('warning') or 'Email sent. Conversation history will update when the mailbox syncs.'
