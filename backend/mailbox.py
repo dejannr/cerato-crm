@@ -51,7 +51,7 @@ def parsed(message):
     try: date=parsedate_to_datetime(message.get('Date')).isoformat()
     except (ValueError,TypeError,OverflowError): pass
     references=' '.join(filter(None,(message.get('In-Reply-To',''),message.get('References',''))))
-    return {'from':text_header(message.get('From')),'to':text_header(message.get('To')),'subject':text_header(message.get('Subject')) or '(No subject)','date':date,'message_id':unfold_header(message.get('Message-ID')) or '','references':unfold_header(references) or '', 'reply_to':getaddresses(message.get_all('Reply-To',[]) or message.get_all('From',[]))[0][1] if (message.get_all('Reply-To',[]) or message.get_all('From',[])) else ''}
+    return {'from':text_header(message.get('From')),'to':text_header(message.get('To')),'subject':text_header(message.get('Subject')) or '(No subject)','date':date,'message_id':unfold_header(message.get('Message-ID')) or '','in_reply_to':unfold_header(message.get('In-Reply-To')) or '', 'references':unfold_header(references) or '', 'reply_to':getaddresses(message.get_all('Reply-To',[]) or message.get_all('From',[]))[0][1] if (message.get_all('Reply-To',[]) or message.get_all('From',[])) else ''}
 
 def connect(address,password,host,port):
     client=imaplib.IMAP4_SSL(host,port,timeout=20)
@@ -91,14 +91,23 @@ def list_messages(client,folder,limit=50):
     status,results=client.uid('search',None,'ALL')
     if status!='OK': raise MailboxError('Could not search mailbox')
     ids=(results[0] or b'').split()[-limit:][::-1]
-    messages=[]
-    for uid in ids:
-        status,rows=client.uid('fetch',uid,'(FLAGS BODY.PEEK[HEADER.FIELDS (FROM TO SUBJECT DATE MESSAGE-ID)])')
-        if status!='OK': continue
-        row=next((x for x in rows if isinstance(x,tuple)),None)
-        if not row: continue
-        entry=parsed(email.message_from_bytes(row[1])); entry.update(uid=uid.decode(),uidvalidity=validity,seen=b'\\Seen' in row[0]); messages.append(entry)
-    return messages
+    if not ids: return []
+    fields='(UID FLAGS BODY.PEEK[HEADER.FIELDS (FROM TO SUBJECT DATE MESSAGE-ID IN-REPLY-TO REFERENCES)])'
+    status,rows=client.uid('fetch',b','.join(ids),fields)
+    if status!='OK': raise MailboxError('Could not load mailbox messages')
+    entries={}
+    rows=rows or []
+    for index,row in enumerate(rows):
+        if not isinstance(row,tuple) or len(row)<2 or not isinstance(row[0],bytes): continue
+        metadata=row[0]
+        for continuation in rows[index+1:]:
+            if isinstance(continuation,tuple): break
+            if isinstance(continuation,bytes): metadata+=b' '+continuation
+        match=re.search(rb'\bUID\s+(\d+)\b',metadata,re.I)
+        if not match or match.group(1) not in ids: continue
+        uid=match.group(1)
+        entry=parsed(email.message_from_bytes(row[1])); entry.update(uid=uid.decode(),uidvalidity=validity,seen=bool(re.search(rb'\\Seen\b',metadata,re.I))); entries[uid]=entry
+    return [entries[uid] for uid in ids if uid in entries]
 
 def read_message(client,folder,uid,uidvalidity):
     _,actual=select_folder(client,folder)

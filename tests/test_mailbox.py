@@ -31,6 +31,26 @@ class FakeSMTP:
     def close(self): pass
 
 class MailboxTests(unittest.TestCase):
+    def test_list_fetches_headers_in_one_batch_and_preserves_order(self):
+        class BatchIMAP(FakeIMAP):
+            def __init__(self): self.fetches=[]
+            def uid(self,operation,*args):
+                if operation=='search': return 'OK',[b'9 10 11']
+                self.fetches.append(args)
+                first=EmailMessage();first['From']='Alex <alex@example.com>';first['Subject']='Original';first['Message-ID']='<original@example.com>'
+                reply=EmailMessage();reply['From']='Alex <alex@example.com>';reply['Subject']='Re: Original';reply['In-Reply-To']='<original@example.com>'
+                return 'OK',[(b'1 (UID 9 FLAGS (\\Seen)',first.as_bytes()), b')', (b'3 (FLAGS ()',reply.as_bytes()), b' UID 11)']
+        fake=BatchIMAP(); rows=client.list_messages(fake,'inbox')
+        self.assertEqual([row['uid'] for row in rows],['11','9'])
+        self.assertEqual(rows[0]['in_reply_to'],'<original@example.com>')
+        self.assertFalse(rows[0]['seen']);self.assertTrue(rows[1]['seen'])
+        self.assertEqual(len(fake.fetches),1);self.assertEqual(fake.fetches[0][0],b'11,10,9')
+    def test_empty_mailbox_does_not_fetch(self):
+        class EmptyIMAP(FakeIMAP):
+            def uid(self,operation,*args):
+                if operation=='search': return 'OK',[b'']
+                raise AssertionError('Empty mailbox should not fetch')
+        self.assertEqual(client.list_messages(EmptyIMAP(),'inbox'),[])
     def test_imap_folders_headers_and_uidvalidity(self):
         fake=FakeIMAP()
         self.assertEqual(client.folder_name(fake,'sent'),'Sent Items')
