@@ -266,6 +266,14 @@ def get_lead(db, id):
     obj = db.get(Lead,id)
     if not obj: raise HTTPException(404, 'Lead not found')
     return obj
+class LeadCreate(BaseModel):
+    company: str
+    city: str = ''
+    contact_name: str = ''
+    person_email: str = ''
+    company_email: str = ''
+    email_type: str = 'unknown'
+
 class LeadUpdate(BaseModel):
     status: str | None = None
     email_type: str | None = None
@@ -461,6 +469,24 @@ def import_leads():
             db.add(Lead(**lead_data, email_type=infer_email_type(lead_data)))
             existing.add(vals[0]); added += 1
     return {'added':added,'skipped':skipped}
+@app.post('/api/leads', status_code=201)
+def create_lead(data: LeadCreate):
+    company, city, contact = data.company.strip(), data.city.strip(), data.contact_name.strip()
+    person_email, company_email = data.person_email.strip(), data.company_email.strip()
+    if not company or any(len(value) > 250 for value in (company, city, contact)):
+        raise HTTPException(400, 'Enter a company name and valid lead details.')
+    if not (person_email or company_email) or any(value and not valid_address(value) for value in (person_email, company_email)):
+        raise HTTPException(400, 'Enter at least one valid email address.')
+    if data.email_type not in ('personal','general','unknown'):
+        raise HTTPException(400, 'Invalid email type')
+    addresses = [value.lower() for value in (person_email, company_email) if value]
+    with Session.begin() as db:
+        duplicate = db.scalar(select(Lead.id).where(func.lower(Lead.company) == company.lower(), or_(func.lower(Lead.person_email).in_(addresses), func.lower(Lead.company_email).in_(addresses))).limit(1))
+        if duplicate: raise HTTPException(409, 'A lead with this company and email already exists.')
+        lead = Lead(company=company, city=city or None, contact_name=contact or None, person_email=person_email or None, company_email=company_email or None, email_type=data.email_type, status='new')
+        db.add(lead); db.flush()
+        return {**serialize(lead), 'owner':None}
+
 @app.get('/api/leads')
 def leads(q: str = '', status: str = '', email_type: str = ''):
     with Session() as db:
