@@ -51,7 +51,7 @@ def parsed(message):
     try: date=parsedate_to_datetime(message.get('Date')).isoformat()
     except (ValueError,TypeError,OverflowError): pass
     references=' '.join(filter(None,(message.get('In-Reply-To',''),message.get('References',''))))
-    return {'from':text_header(message.get('From')),'to':text_header(message.get('To')),'subject':text_header(message.get('Subject')) or '(No subject)','date':date,'message_id':unfold_header(message.get('Message-ID')) or '','in_reply_to':unfold_header(message.get('In-Reply-To')) or '', 'references':unfold_header(references) or '', 'reply_to':getaddresses(message.get_all('Reply-To',[]) or message.get_all('From',[]))[0][1] if (message.get_all('Reply-To',[]) or message.get_all('From',[])) else ''}
+    return {'from':text_header(message.get('From')),'to':text_header(message.get('To')),'cc':text_header(', '.join(message.get_all('Cc',[]))),'subject':text_header(message.get('Subject')) or '(No subject)','date':date,'message_id':unfold_header(message.get('Message-ID')) or '','in_reply_to':unfold_header(message.get('In-Reply-To')) or '', 'references':unfold_header(references) or '', 'auto_submitted':unfold_header(message.get('Auto-Submitted')) or '', 'precedence':unfold_header(message.get('Precedence')) or '', 'reply_to':getaddresses(message.get_all('Reply-To',[]) or message.get_all('From',[]))[0][1] if (message.get_all('Reply-To',[]) or message.get_all('From',[])) else ''}
 
 def connect(address,password,host,port):
     client=imaplib.IMAP4_SSL(host,port,timeout=20)
@@ -91,8 +91,11 @@ def list_messages(client,folder,limit=50):
     status,results=client.uid('search',None,'ALL')
     if status!='OK': raise MailboxError('Could not search mailbox')
     ids=(results[0] or b'').split()[-limit:][::-1]
+    return fetch_headers(client,ids,validity)
+
+def fetch_headers(client,ids,validity):
     if not ids: return []
-    fields='(UID FLAGS BODY.PEEK[HEADER.FIELDS (FROM TO SUBJECT DATE MESSAGE-ID IN-REPLY-TO REFERENCES)])'
+    fields='(UID FLAGS BODY.PEEK[HEADER.FIELDS (FROM TO CC SUBJECT DATE MESSAGE-ID IN-REPLY-TO REFERENCES AUTO-SUBMITTED PRECEDENCE)])'
     status,rows=client.uid('fetch',b','.join(ids),fields)
     if status!='OK': raise MailboxError('Could not load mailbox messages')
     entries={}

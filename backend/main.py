@@ -4,6 +4,7 @@ import binascii
 import html
 import io
 import json
+import logging
 import hashlib
 import hmac
 import secrets
@@ -37,7 +38,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from openpyxl import load_workbook
 from pydantic import BaseModel
 from PIL import Image, ImageDraw, ImageOps, UnidentifiedImageError
-from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text, create_engine, delete, func, or_, select
+from sqlalchemy import BigInteger, Boolean, DateTime, ForeignKey, Integer, String, Text, create_engine, delete, func, or_, select
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, sessionmaker
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -86,6 +87,16 @@ class MailboxCredential(Base):
     sender: Mapped[str] = mapped_column(String, primary_key=True)
     address: Mapped[str] = mapped_column(String)
     encrypted_password: Mapped[str] = mapped_column(Text)
+
+class MailboxSyncCursor(Base):
+    __tablename__ = 'mailbox_sync_cursors'
+    sender: Mapped[str] = mapped_column(String, primary_key=True)
+    folder: Mapped[str] = mapped_column(String, primary_key=True)
+    uidvalidity: Mapped[str] = mapped_column(String, default='')
+    last_uid: Mapped[int] = mapped_column(BigInteger, default=0)
+    checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    error: Mapped[str | None] = mapped_column(Text)
+    has_more: Mapped[bool] = mapped_column(Boolean, default=False)
 
 class MailboxPreferences(Base):
     __tablename__ = 'mailbox_preferences'
@@ -609,11 +620,15 @@ def send_lead_draft(id: int, data: SendLeadDraftInput):
     with Session.begin() as db:
         lead = db.scalar(select(Lead).where(Lead.id == lead_id).with_for_update())
         draft = db.scalar(select(Message).where(Message.id == id).with_for_update().execution_options(populate_existing=True))
-        draft.status = 'draft' if status == 'failed' else status
-        draft.error = result.get('warning')
-        if status == 'sent':
-            draft.message_id = result.get('message_id'); draft.sent_at = now()
-            if lead.status not in ('replied','do_not_contact'): lead.status = 'sent'
+        if draft.status == 'sent':
+            if status != 'sent': result['warning']='The message was found in your Sent folder.'
+            status = 'sent'  # Sent-folder synchronization confirmed the message during submission.
+        else:
+            draft.status = 'draft' if status == 'failed' else status
+            draft.error = result.get('warning')
+            if status == 'sent':
+                draft.message_id = result.get('message_id'); draft.sent_at = now()
+                if lead.status not in ('replied','do_not_contact'): lead.status = 'sent'
     return {'status':status, 'warning':result.get('warning')}
 
 # Jobs deliberately stay in memory: a service restart interrupts them instead of resending.
@@ -881,30 +896,69 @@ def send_manual_mail(sender: str, data: ComposeMailInput):
         item=db.get(MailSubmission,str(data.request_id)); item.status='sent'; item.error=warning
     return {'status':'sent','message_id':message_id,'warning':warning}
 
+# Mailbox status synchronization runs independently of the web interface.
+SYNC_INTERVAL_SECONDS=120
+SYNC_POOL=ThreadPoolExecutor(max_workers=1)
+SYNC_STATE_LOCK=threading.Lock()
+SYNC_STOP=threading.Event()
+SYNC_RUNNING=False
+
+def queue_mail_sync():
+    global SYNC_RUNNING
+    with SYNC_STATE_LOCK:
+        if SYNC_RUNNING:return False
+        SYNC_RUNNING=True
+    def run():
+        global SYNC_RUNNING
+        try:
+            from backend.lead_sync import sync_sender
+            for sender in ('stefan','adrija'):
+                try:sync_sender(sender)
+                except Exception as exc:logging.getLogger(__name__).warning('Mailbox synchronization failed for %s: %s',sender,type(exc).__name__)
+        finally:
+            with SYNC_STATE_LOCK:SYNC_RUNNING=False
+    try:SYNC_POOL.submit(run)
+    except Exception:
+        with SYNC_STATE_LOCK:SYNC_RUNNING=False
+        raise
+    return True
+
+@app.on_event('startup')
+def start_mail_sync():
+    if os.getenv('CRM_MAIL_SYNC_ENABLED','true').lower() in ('0','false','no'):return
+    SYNC_STOP.clear()
+    def schedule():
+        if SYNC_STOP.wait(5):return
+        while not SYNC_STOP.is_set():
+            queue_mail_sync()
+            if SYNC_STOP.wait(SYNC_INTERVAL_SECONDS):break
+    threading.Thread(target=schedule,name='mailbox-lead-sync',daemon=True).start()
+
+@app.on_event('shutdown')
+def stop_mail_sync():
+    SYNC_STOP.set()
+
+@app.get('/api/mail-sync/status')
+def mail_sync_status():
+    accounts=settings()['mailboxes']
+    with Session() as db:
+        rows=db.scalars(select(MailboxSyncCursor)).all()
+        states={(row.sender,row.folder):row for row in rows}
+        result=[]
+        for account in accounts:
+            folders={}
+            for folder in ('sent','inbox'):
+                row=states.get((account['id'],folder))
+                folders[folder]={'checked_at':row.checked_at if row else None,'error':row.error if row else None,'has_more':row.has_more if row else False}
+            result.append({'id':account['id'],'configured':account['configured'],'folders':folders})
+    with SYNC_STATE_LOCK:running=SYNC_RUNNING
+    return {'running':running,'mailboxes':result}
+
+@app.post('/api/mail-sync/refresh')
+def refresh_mail_sync():
+    return {'started':queue_mail_sync()}
+
 @app.post('/api/sync/{sender}')
 def sync(sender:str):
-    address,password=mailbox(sender); matched=0
-    try:
-        with imaplib.IMAP4_SSL(os.getenv('IMAP_HOST','imap.purelymail.com'),int(os.getenv('IMAP_PORT','993'))) as imap:
-            imap.login(address,password); imap.select('INBOX',readonly=True)
-            typ, ids=imap.search(None,'ALL')
-            if typ!='OK': raise RuntimeError('Could not search inbox')
-            for uid in ids[0].split():
-                typ, result=imap.fetch(uid,'(BODY.PEEK[])')
-                if typ!='OK' or not result or not isinstance(result[0],tuple): continue
-                msg=email.message_from_bytes(result[0][1]); mid=msg.get('Message-ID'); references=(msg.get('In-Reply-To','')+' '+msg.get('References',''))
-                if not mid: continue
-                with Session.begin() as db:
-                    if db.scalar(select(Message.id).where(Message.message_id==mid)): continue
-                    outgoing=db.scalars(select(Message).where(Message.sender==sender,Message.direction=='outbound',Message.status.in_(['sent','sending','uncertain']))).all()
-                    original=next((m for m in outgoing if m.message_id and m.message_id in references),None)
-                    if not original: continue
-                    from_addresses=[a.lower() for _,a in getaddresses(msg.get_all('From',[]))]
-                    if original.recipient.lower() not in from_addresses: continue
-                    lead=get_lead(db,original.lead_id)
-                    db.add(Message(lead_id=lead.id,direction='inbound',status='received',sender=sender,recipient=address,subject=decoded(msg.get('Subject')),body=plain_body(msg),message_id=mid,in_reply_to=msg.get('In-Reply-To')))
-                    if lead.status!='do_not_contact': lead.status='replied'
-                    matched+=1
-    except HTTPException: raise
-    except Exception as exc: raise HTTPException(502,f'Inbox sync failed: {str(exc)[:300]}')
-    return {'matched':matched}
+    from backend.lead_sync import sync_sender
+    return sync_sender(sender)
