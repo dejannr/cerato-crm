@@ -368,7 +368,7 @@ def signature_html(profile):
     photo=profile.get('photo_id')
     photo_cell=(f'<td style="padding-right:18px;vertical-align:middle"><img src="{html.escape(origin,quote=True)}/api/signature-images/{photo}.png" alt="{name}" width="85" height="85" style="display:block;width:85px;height:85px;border-radius:50%"></td>' if photo else '')
     divider='padding-left:18px;border-left:1px solid #cbd5d1;' if photo else ''
-    return (f'<table cellpadding="0" cellspacing="0" border="0" style="font-family:Arial,Helvetica,sans-serif;color:#1f2937"><tr><td colspan="2" style="padding-bottom:16px;font-size:14px">Best,</td></tr><tr>{photo_cell}<td style="{divider}vertical-align:middle"><div style="font-size:17px;font-weight:700;color:#111827;margin-bottom:5px">{name}</div><div style="font-size:13px;color:#4b5563;margin-bottom:7px">{title} <span style="color:#9ca3af">|</span> Cerato Systems</div><a href="mailto:{address}" style="font-size:13px;color:#374151;text-decoration:none">{address}</a></td></tr></table>')
+    return (f'<table cellpadding="0" cellspacing="0" border="0" style="font-family:Arial,Helvetica,sans-serif;color:#1f2937"><tr><td colspan="2" style="padding-bottom:16px;font-size:14px">Best,</td></tr><tr>{photo_cell}<td style="{divider}vertical-align:middle"><div style="font-size:17px;font-weight:700;color:#111827;margin-bottom:5px">{name}</div><div style="font-size:13px;color:#4b5563;margin-bottom:7px">{title} <span style="color:#9ca3af">|</span> Cerato Systems</div><a href="mailto:{address}" style="font-size:13px;color:#374151;text-decoration:none">{address}</a><br><a href="https://www.ceratosystems.com" style="font-size:13px;color:#374151;text-decoration:none">www.ceratosystems.com</a></td></tr></table>')
 
 class SignatureSettingsInput(BaseModel):
     name: str
@@ -884,7 +884,7 @@ def send_manual_mail(sender: str, data: ComposeMailInput):
         msg['In-Reply-To']=in_reply_to
         msg['References']=(references+' '+in_reply_to).strip()
     plain=(rich_email.plain_text(rich_email.clean_fragment(data.html_body)) if data.html_body is not None else data.body)
-    if profile: plain+='\n\nBest,\n'+profile['name']+'\n'+profile['title']+' | Cerato Systems\n'+profile['email']
+    if profile: plain+='\n\nBest,\n'+profile['name']+'\n'+profile['title']+' | Cerato Systems\n'+profile['email']+'\nwww.ceratosystems.com'
     msg.set_content(plain or '[Image]')
     if html_body is not None:
         rendered,images=rich_email.mime_html(html_body)
