@@ -31,6 +31,41 @@ class FakeSMTP:
     def close(self): pass
 
 class MailboxTests(unittest.TestCase):
+    def test_conversation_uses_thread_headers_across_folders(self):
+        def message(mid,subject,body,date,reply=''):
+            msg=EmailMessage();msg['From']='Alex <alex@example.com>';msg['To']='stefan@example.com';msg['Subject']=subject;msg['Message-ID']=mid;msg['Date']=date
+            if reply: msg['In-Reply-To']=reply;msg['References']=reply
+            msg.set_content(body);return msg.as_bytes()
+        original=message('<original@example.com>','Booking','Original','Mon, 09 Nov 2026 10:00:00 +0000')
+        response=message('<reply@example.com>','Re: Booking','Reply','Mon, 09 Nov 2026 11:00:00 +0000','<original@example.com>')
+        unrelated=message('<other@example.com>','Re: Booking','Unrelated','Mon, 09 Nov 2026 12:00:00 +0000')
+        class ThreadIMAP(FakeIMAP):
+            def __init__(self): self.folder='inbox';self.fetches=[]
+            def select(self,name,**kwargs): self.folder='sent' if 'Sent Items' in name else 'inbox';return 'OK',[b'2']
+            def response(self,name): return 'UIDVALIDITY',[(b'200' if self.folder=='sent' else b'100')]
+            def uid(self,operation,*args):
+                data={'inbox':{'3':response,'4':unrelated},'sent':{'7':original}}[self.folder]
+                if operation=='search': return 'OK',[(' '.join(data)).encode()]
+                uidset=args[0].decode() if isinstance(args[0],bytes) else args[0]; query=args[1];self.fetches.append(query)
+                rows=[]
+                for uid in uidset.split(','):
+                    if uid in data: rows.append((f'{uid} (UID {uid} FLAGS ()'.encode(),data[uid]));rows.append(b')')
+                return 'OK',rows
+        fake=ThreadIMAP();result=client.read_conversation(fake,'inbox','3','100')
+        self.assertEqual([m['message_id'] for m in result['messages']],['<original@example.com>','<reply@example.com>'])
+        self.assertEqual([m['folder'] for m in result['messages']],['sent','inbox'])
+        self.assertIn('latest 50',result['notice'])
+        self.assertTrue(all('BODY.PEEK' in query for query in fake.fetches))
+        with self.assertRaises(client.MailboxError):client.read_conversation(fake,'inbox','3','wrong')
+
+    def test_conversation_without_message_id_stays_on_selected_message(self):
+        class NoId(FakeIMAP):
+            def uid(self,operation,*args):
+                msg=EmailMessage();msg['From']='Alex <alex@example.com>';msg.set_content('Hello')
+                return 'OK',[(b'9 (UID 9 FLAGS ()',msg.as_bytes())]
+        result=client.read_conversation(NoId(),'inbox','9','123')
+        self.assertEqual(len(result['messages']),1);self.assertIn('no thread identifier',result['notice'])
+
     def test_list_fetches_headers_in_one_batch_and_preserves_order(self):
         class BatchIMAP(FakeIMAP):
             def __init__(self): self.fetches=[]

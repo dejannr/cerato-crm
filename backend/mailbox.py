@@ -112,6 +112,9 @@ def list_messages(client,folder,limit=50):
 def read_message(client,folder,uid,uidvalidity):
     _,actual=select_folder(client,folder)
     if not uidvalidity or uidvalidity != actual: raise MailboxError('Mailbox changed; refresh the message list')
+    return read_selected_message(client,uid,actual)
+
+def read_selected_message(client,uid,actual):
     if not uid.isdigit(): raise MailboxError('Invalid message identifier')
     status,rows=client.uid('fetch',uid,'(BODY.PEEK[])')
     row=next((x for x in rows if isinstance(x,tuple)),None) if status=='OK' else None
@@ -119,3 +122,65 @@ def read_message(client,folder,uid,uidvalidity):
     message=email.message_from_bytes(row[1]); entry=parsed(message); entry.update(body=body_text(message),uid=uid,uidvalidity=actual)
     entry['attachments']=[text_header(p.get_filename()) for p in message.walk() if p.get_filename()][:30]
     return entry
+
+def message_ids(value):
+    return set(re.findall(r'<[^<>\s]{1,512}>',value or ''))
+
+def read_conversation(client,folder,uid,uidvalidity,limit=12):
+    selected=read_message(client,folder,uid,uidvalidity)
+    selected['folder']=folder
+    root_ids=message_ids(selected.get('message_id'))
+    if not root_ids:
+        return {'messages':[selected], 'notice':'This message has no thread identifier, so related messages could not be located.'}
+    known=root_ids | message_ids(selected.get('references'))
+    candidates=[]; unavailable=[]
+    for source in ('inbox','sent'):
+        try:
+            candidates.extend({**item,'folder':source} for item in list_messages(client,source))
+        except Exception:
+            unavailable.append(source.title())
+    related=[]; remaining=candidates[:]; changed=True
+    while changed:
+        changed=False; unmatched=[]
+        for item in remaining:
+            own=message_ids(item.get('message_id')); refs=message_ids(item.get('references'))
+            if own and (own & known or refs & known):
+                related.append(item); known.update(own | refs); changed=True
+            else: unmatched.append(item)
+        remaining=unmatched
+    def order(item):
+        try: return parsedate_to_datetime(item.get('date')).timestamp()
+        except (ValueError,TypeError,OverflowError):
+            try:
+                from datetime import datetime
+                return datetime.fromisoformat(item.get('date') or '').timestamp()
+            except (ValueError,TypeError,OverflowError): return 0
+    unique={selected['message_id']:selected}
+    for item in related:
+        mid=item.get('message_id')
+        if mid and mid not in unique: unique[mid]=item
+    headers=sorted(unique.values(),key=order)
+    truncated=len(headers)>limit
+    if truncated:
+        headers=headers[-limit:]
+        if not any(item.get('message_id')==selected['message_id'] for item in headers): headers=[selected]+headers[1:]
+    results={selected['message_id']:selected}; missing=False
+    for source in ('inbox','sent'):
+        to_read=[item for item in headers if item.get('folder')==source and item.get('message_id')!=selected['message_id']]
+        if not to_read: continue
+        try:
+            _,actual=select_folder(client,source)
+            for item in to_read:
+                if not item.get('uidvalidity') or item['uidvalidity']!=actual: missing=True; continue
+                try:
+                    message=read_selected_message(client,item['uid'],actual); message['folder']=source
+                    if message.get('message_id')==item.get('message_id'): results[item['message_id']]=message
+                    else: missing=True
+                except Exception: missing=True
+        except Exception: unavailable.append(source.title())
+    messages=[results[item['message_id']] for item in headers if item.get('message_id') in results]
+    notice='Shows matching messages from the latest 50 in Inbox and Sent.'
+    if truncated: notice+=' Only the most recent matches are shown.'
+    if unavailable: notice+=' Could not read: '+', '.join(sorted(set(unavailable)))+'.'
+    if missing: notice+=' Some messages could not be loaded.'
+    return {'messages':messages,'notice':notice}

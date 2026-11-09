@@ -783,6 +783,14 @@ def mailbox_message(sender: str, uid: str, folder: str = 'inbox', uidvalidity: s
     except mail_client.MailboxError as exc: raise HTTPException(400,str(exc))
     except Exception: raise HTTPException(502,'Could not read this message from the mailbox.')
 
+@app.get('/api/mail/{sender}/messages/{uid}/conversation')
+def mailbox_conversation(sender: str, uid: str, folder: str = 'inbox', uidvalidity: str = ''):
+    try:
+        with mail_connection(sender) as client: return mail_client.read_conversation(client,folder,uid,uidvalidity)
+    except HTTPException: raise
+    except mail_client.MailboxError as exc: raise HTTPException(400,str(exc))
+    except Exception: raise HTTPException(502,'Could not load this conversation from the mailbox.')
+
 @app.post('/api/mail/{sender}/send')
 def send_manual_mail(sender: str, data: ComposeMailInput):
     address,password = mailbox(sender)
